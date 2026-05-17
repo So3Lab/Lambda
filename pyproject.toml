@@ -5,7 +5,7 @@ description = "A practical coding agent CLI built with Textual and SimpleLLMFunc
 authors = [
     {name = "NiJinghe"}
 ]
-requires-python = "^3.12"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "simplellmfunc @ file:///Users/lildino/Project/ocws/SimpleLLMFunc"
 ]
@@ -17,6 +17,9 @@ lambda-agent = "lambda_coding_agent.cli:main"
 pytest = "^8.0"
 pytest-asyncio = "^0.24"
 
+
+[tool.poetry.dependencies]
+simplellmfunc = {develop = true}
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
