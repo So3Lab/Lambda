@@ -53,8 +53,14 @@ provider.json
 
 # Logs and local tool state
 logs/
-.lambda/
 .qoder/
+
+# Lambda agent local runtime/cache state
+# Keep the .lambda/ directory itself trackable for project docs, skills, and config.
+.lambda/sessions/
+.lambda/plans/
+.lambda/webfetch/
+.lambda/explore_*/
 
 # OS / editor
 .DS_Store
