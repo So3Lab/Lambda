@@ -126,7 +126,7 @@ class TestWebFetch:
             execution_id="test",
             backend=pack.backend,
         )
-        result = entry.handler(ctx, f"{server_url}/large", max_chars=10, output_path="fetches/large.txt")
+        result = entry.handler(ctx, f"{server_url}/large", max_chars=10, file="fetches/large.txt")
         assert "success: True" in result
         assert "saved_path: fetches/large.txt" in result
         assert "preview_truncated: True" in result

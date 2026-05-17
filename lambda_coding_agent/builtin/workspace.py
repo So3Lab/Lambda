@@ -498,18 +498,20 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         url: str,
         timeout: int = 20,
         max_chars: int = 20000,
+        file: str = "",
         output_path: str = "",
     ) -> str:
         """
         Use: Fetch an HTTP/HTTPS URL, save full readable text to a workspace file, and return a short preview.
-        Input: `url: str`, `timeout: int` (default 20), `max_chars: int` (preview chars, default 20000), `output_path: str` (optional).
+        Input: `url: str`, `timeout: int` (default 20), `max_chars: int` (preview chars, default 20000), `file: str` (optional workspace-relative output file), `output_path: str` (deprecated alias).
         Output: Structured text with success, status_code, final_url, content_type, saved_path, preview_truncated, error, and preview text.
         Parse: Check success first. If true, read saved_path and use read_file on it for the full content; preview is under "--- preview ---".
         Parameters:
         - url: Absolute http:// or https:// URL to fetch.
         - timeout: Max seconds before giving up. Capped to 120 seconds.
         - max_chars: Max preview chars to return. Capped to 20000.
-        - output_path: Workspace-relative file path for the full fetched text. Empty writes under .lambda/webfetch/.
+        - file: Workspace-relative file path for the full fetched text. Empty writes under .lambda/webfetch/.
+        - output_path: Deprecated alias for file.
         Best Practices:
         - Save the full fetched content to a file and print only a truncated preview plus saved_path.
         - Inspect the full content incrementally with read_file(saved_path, offset=..., limit=...).
@@ -539,15 +541,16 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         saved_path = ""
         write_error = ""
         if result["success"]:
-            if output_path:
-                abs_path, err = backend._resolve_path(output_path)
+            requested_path = file or output_path
+            if requested_path:
+                abs_path, err = backend._resolve_path(requested_path)
                 if err:
                     write_error = err
                     result["success"] = False
                     result["error"] = err
                     abs_path = None
                 else:
-                    saved_path = output_path
+                    saved_path = requested_path
             else:
                 digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
                 saved_path = f".lambda/webfetch/{int(_time.time())}_{digest}.txt"
