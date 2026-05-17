@@ -25,7 +25,7 @@ class TestCommandPalette:
             async with app.run_test() as pilot:
                 # Our custom commands only
                 our_commands = [
-                    "Switch Model", "Sessions", "Rewind", "Clear Chat"
+                    "Switch Model", "Sessions", "Rewind", "Refresh Skills", "Clear Chat"
                 ]
                 commands = list(app.get_system_commands(app.screen))
                 names = [cmd.title for cmd in commands]

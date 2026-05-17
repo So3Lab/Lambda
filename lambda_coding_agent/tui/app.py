@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from textual.app import App, ComposeResult, SystemCommand
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.binding import Binding
+from textual.geometry import Offset, Region, Size, clamp
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Input, Markdown, Static, TabbedContent, TabPane
+from textual.widgets import Input, Markdown, OptionList, Static, TabbedContent, TabPane
 
 from SimpleLLMFunc.hooks.abort import AbortSignal
 from SimpleLLMFunc.hooks.stream import is_event_yield
@@ -38,6 +40,10 @@ from lambda_coding_agent.tui.tool_cards import create_tool_card
 from lambda_coding_agent.tui.session import SessionManager
 from lambda_coding_agent.tui.plan_panel import PlanPanel
 from lambda_coding_agent.tools.plan import PlanManager
+
+from rich.cells import cell_len, get_character_cell_size
+from textual.expand_tabs import expand_tabs_inline
+from textual.widgets._input import Selection
 
 
 def _patch_markdown_append() -> None:
@@ -157,6 +163,112 @@ def _extract_fork_id_from_tool(tool_call_id: str) -> str | None:
     return parts[0] if parts else None
 
 
+class ChatInput(Input):
+    """Multi-line chat input that submits on Enter and inserts newlines on Shift+Enter."""
+
+    BINDINGS = [
+        *Input.BINDINGS,
+        Binding("shift+enter", "insert_newline", "Insert newline", show=False),
+        Binding("up", "cursor_up", "Cursor up", show=False),
+        Binding("down", "cursor_down", "Cursor down", show=False),
+        Binding("shift+up", "cursor_up(True)", "Select up", show=False),
+        Binding("shift+down", "cursor_down(True)", "Select down", show=False),
+    ]
+
+    @property
+    def _line_count(self) -> int:
+        return max(1, self.value.count("\n") + 1)
+
+    def _line_starts(self) -> list[int]:
+        starts = [0]
+        for index, char in enumerate(self.value):
+            if char == "\n":
+                starts.append(index + 1)
+        return starts
+
+    def _position_to_line_column(self, position: int) -> tuple[int, int]:
+        starts = self._line_starts()
+        line = 0
+        for index, start in enumerate(starts):
+            if start > position:
+                break
+            line = index
+        return line, position - starts[line]
+
+    def _line_column_to_position(self, line: int, column: int) -> int:
+        starts = self._line_starts()
+        lines = self.value.split("\n")
+        line = int(clamp(line, 0, len(starts) - 1))
+        column = int(clamp(column, 0, len(lines[line])))
+        return starts[line] + column
+
+    def _position_to_cell(self, position: int) -> int:
+        line, column = self._position_to_line_column(position)
+        line_text = self.value.split("\n")[line]
+        return cell_len(expand_tabs_inline(line_text[:column], 4))
+
+    def _cell_offset_to_index(self, offset: int) -> int:
+        line, _ = self._position_to_line_column(self.cursor_position)
+        line_text = self.value.split("\n")[line]
+        cell_offset = 0
+        scroll_x, _ = self.scroll_offset
+        offset += int(scroll_x)
+        for index, char in enumerate(line_text):
+            cell_width = get_character_cell_size(char)
+            if cell_offset <= offset < cell_offset + cell_width:
+                return self._line_column_to_position(line, index)
+            cell_offset += cell_width
+        return self._line_column_to_position(line, int(clamp(offset, 0, len(line_text))))
+
+    @property
+    def cursor_screen_offset(self) -> Offset:
+        x, y, _width, _height = self.content_region
+        scroll_x, scroll_y = self.scroll_offset
+        line, _ = self._position_to_line_column(self.cursor_position)
+        return Offset(x + self._cursor_offset - int(scroll_x), y + line - int(scroll_y))
+
+    def _watch_value(self, value: str) -> None:
+        super()._watch_value(value)
+        self.virtual_size = Size(self.content_width, self._line_count)
+
+    def _watch_selection(self, selection: Selection) -> None:
+        self.app.clear_selection()
+        self.app.cursor_position = self.cursor_screen_offset
+        if not self._initial_value:
+            line, _ = self._position_to_line_column(self.cursor_position)
+            self.scroll_to_region(
+                Region(self._cursor_offset, line, width=1, height=1),
+                force=True,
+                animate=False,
+            )
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        return self._line_count
+
+    def action_insert_newline(self) -> None:
+        self.insert_text_at_cursor("\n")
+
+    def action_cursor_up(self, select: bool = False) -> None:
+        line, column = self._position_to_line_column(self.cursor_position)
+        if line <= 0:
+            return
+        position = self._line_column_to_position(line - 1, column)
+        if select:
+            self.selection = Selection(self.selection.start, position)
+        else:
+            self.selection = Selection.cursor(position)
+
+    def action_cursor_down(self, select: bool = False) -> None:
+        line, column = self._position_to_line_column(self.cursor_position)
+        if line >= self._line_count - 1:
+            return
+        position = self._line_column_to_position(line + 1, column)
+        if select:
+            self.selection = Selection(self.selection.start, position)
+        else:
+            self.selection = Selection.cursor(position)
+
+
 @dataclass
 class _ModelState:
     """State for a single model response within a turn.
@@ -273,8 +385,21 @@ class LambdaCodingTUIApp(App[None]):
     #status-left { width: 1fr; }
     #status-right { width: auto; }
 
-    #chat-input {
+    #input-area {
         dock: bottom;
+        height: auto;
+    }
+
+    #path-autocomplete {
+        display: none;
+        max-height: 8;
+        margin: 0 1;
+        border: tall #6f87a8;
+    }
+
+    #chat-input {
+        height: auto;
+        max-height: 8;
         margin: 0 1 1 1;
         border: tall #6f87a8;
     }
@@ -374,7 +499,7 @@ class LambdaCodingTUIApp(App[None]):
     ):
         super().__init__(**kwargs)
         self.agent_func = agent_func
-        self.workspace = workspace
+        self.workspace = os.path.abspath(os.path.expanduser(str(workspace)))
         self.model_name = model_name
         self.git_info = git_info
         self.provider_path = provider_path
@@ -394,17 +519,19 @@ class LambdaCodingTUIApp(App[None]):
         self._working_indicator: Static | None = None
         self._auto_scroll: bool = True
         self._last_prompt_tokens: int = 0
+        self._skill_count: int = int(getattr(agent_func, "_skill_count", 0) or 0)
         self._queued_text: str | None = None
         self._flushing_models: set[str] = set()
         self._flushing_tools: set[str] = set()
+        self._suppress_path_autocomplete = False
 
         # Session management
-        self.session_manager = SessionManager(workspace)
+        self.session_manager = SessionManager(self.workspace)
         self._current_session_id: str | None = None
         self._save_timer: asyncio.TimerHandle | None = None
 
         # Plan management (session-scoped)
-        self.plan_manager = PlanManager(workspace, self._current_session_id)
+        self.plan_manager = PlanManager(self.workspace, self._current_session_id)
         self.plan_panel: PlanPanel | None = None
         self._save_debounce_secs = 30.0
         self._name_generated: bool = False
@@ -422,10 +549,12 @@ class LambdaCodingTUIApp(App[None]):
         with TabbedContent(id="agent-tabs", initial="main-pane"):
             with TabPane("Main", id="main-pane"):
                 yield VerticalScroll(id="main-chat-log")
-        yield Input(
-            placeholder="Type a message... (press / for commands)",
-            id="chat-input",
-        )
+        with Container(id="input-area"):
+            yield OptionList(id="path-autocomplete")
+            yield ChatInput(
+                placeholder="Type a message... (Enter send, Shift+Enter newline, @ file)",
+                id="chat-input",
+            )
         yield Horizontal(
             Static("", id="status-left"),
             Static("", id="status-right"),
@@ -435,7 +564,7 @@ class LambdaCodingTUIApp(App[None]):
     def on_mount(self) -> None:
         _patch_markdown_append()
         self._update_status_bar()
-        self.query_one("#chat-input", Input).focus()
+        self._chat_input().focus()
         # Start with single-pane class (hides tab bar when no forks)
         self.query_one("#agent-tabs", TabbedContent).add_class("single-pane")
         # Start a new session
@@ -486,11 +615,19 @@ class LambdaCodingTUIApp(App[None]):
         except Exception:
             pass
 
+    def _modal_screen_active(self) -> bool:
+        return any(screen.is_modal for screen in self.screen_stack[1:])
+
+    def on_click(self, event) -> None:
+        if not self._modal_screen_active():
+            self._chat_input().focus()
+
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
         yield SystemCommand("Switch Model", "Select a different LLM model", self._open_model_selector)
         yield SystemCommand("Sessions", "Browse and switch sessions", self._open_session_selector)
         yield SystemCommand("Rewind", "Rewind to an earlier message", self._open_rewind_selector)
+        yield SystemCommand("Refresh Skills", "Reload discovered Agent Skills", self._refresh_skills)
         yield SystemCommand("Clear Chat", "Clear all chat history", self._clear_chat)
 
     def _do_undo(self) -> None:
@@ -513,7 +650,7 @@ class LambdaCodingTUIApp(App[None]):
         git = self._git_info_cache or self.git_info
         if git:
             left += f"  |  {git}"
-        right = f"model: {self.model_name}"
+        right = f"model: {self.model_name}  |  skills: {self._skill_count}"
         if self._last_prompt_tokens > 0 and self.context_window > 0:
             pct = int(self._last_prompt_tokens * 100 / self.context_window)
             right += f"  |  ctx: {pct}%"
@@ -571,7 +708,7 @@ class LambdaCodingTUIApp(App[None]):
 
     def action_clear_input(self) -> None:
         """Clear the chat input without exiting the TUI."""
-        input_widget = self.query_one("#chat-input", Input)
+        input_widget = self._chat_input()
         input_widget.value = ""
         input_widget.focus()
 
@@ -1017,12 +1154,113 @@ class LambdaCodingTUIApp(App[None]):
 
     # ── User input handling ───────────────────────────────────
 
+    def _chat_input(self) -> ChatInput:
+        return self.query_one("#chat-input", ChatInput)
+
+    def _path_autocomplete(self) -> OptionList:
+        return self.query_one("#path-autocomplete", OptionList)
+
+    def _active_path_token(self) -> tuple[int, str] | None:
+        input_widget = self._chat_input()
+        prefix = input_widget.value[:input_widget.cursor_position]
+        match = re.search(r"(?:^|\s)@([^\s]*)$", prefix)
+        if not match:
+            return None
+        return match.start(1), match.group(1)
+
+    def _matching_workspace_paths(self, query: str) -> list[str]:
+        matches: list[tuple[tuple[int, int, str], str]] = []
+        query = query.replace(os.sep, "/").replace("\\", "/").strip("/")
+        query_lower = query.casefold()
+        query_parts = [part for part in query_lower.split("/") if part]
+
+        def match_score(rel_path: str) -> tuple[int, int, str] | None:
+            rel_lower = rel_path.casefold()
+            name_lower = rel_lower.rsplit("/", 1)[-1]
+            if not query_lower or rel_lower.startswith(query_lower):
+                return (0, len(rel_path), rel_path)
+            if f"/{query_lower}" in rel_lower:
+                return (1, len(rel_path), rel_path)
+            if name_lower.startswith(query_lower):
+                return (2, len(rel_path), rel_path)
+            if query_lower in name_lower:
+                return (3, len(rel_path), rel_path)
+            if query_lower in rel_lower:
+                return (4, len(rel_path), rel_path)
+            if len(query_parts) > 1:
+                path_parts = rel_lower.split("/")
+                index = 0
+                for part in query_parts:
+                    for index in range(index, len(path_parts)):
+                        if part in path_parts[index]:
+                            index += 1
+                            break
+                    else:
+                        return None
+                return (5, len(rel_path), rel_path)
+            return None
+
+        for root, dirs, files in os.walk(self.workspace):
+            dirs[:] = [d for d in dirs if d not in {".git", ".lambda", "__pycache__"}]
+            rel_root = os.path.relpath(root, self.workspace)
+            if rel_root == ".":
+                rel_root = ""
+            for name in files:
+                rel_path = os.path.join(rel_root, name) if rel_root else name
+                rel_path = rel_path.replace(os.sep, "/")
+                score = match_score(rel_path)
+                if score is not None:
+                    matches.append((score, rel_path))
+        return [path for _, path in sorted(matches)[:8]]
+
+    def _update_path_autocomplete(self) -> None:
+        popup = self._path_autocomplete()
+        active = self._active_path_token()
+        if active is None:
+            popup.display = False
+            popup.clear_options()
+            return
+        _, query = active
+        matches = self._matching_workspace_paths(query)
+        if not matches:
+            popup.display = False
+            popup.clear_options()
+            return
+        popup.clear_options().add_options(matches)
+        popup.highlighted = 0
+        popup.display = True
+
+    def _hide_path_autocomplete(self) -> None:
+        popup = self._path_autocomplete()
+        popup.display = False
+        popup.clear_options()
+
+    def _insert_path_completion(self, path: str) -> None:
+        active = self._active_path_token()
+        if active is None:
+            return
+        start, query = active
+        input_widget = self._chat_input()
+        end = start + len(query)
+        self._suppress_path_autocomplete = True
+        input_widget.replace(path, start, end)
+        self._hide_path_autocomplete()
+        input_widget.focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not self._chat_input():
+            return
+        popup = self._path_autocomplete()
+        if popup.display and popup.highlighted is not None:
+            option = popup.get_option_at_index(popup.highlighted)
+            self._insert_path_completion(str(option.prompt))
+            return
+
         text = event.value.strip()
         if not text:
             return
 
-        input_widget = self.query_one("#chat-input", Input)
+        input_widget = self._chat_input()
         input_widget.value = ""
 
         lowered = text.lower()
@@ -1030,6 +1268,9 @@ class LambdaCodingTUIApp(App[None]):
         # "/" opens command palette
         if lowered == "/":
             self.action_command_palette()
+            return
+        if lowered in ("/skills refresh", "/refresh skills"):
+            await self._refresh_skills()
             return
         if lowered.startswith("/"):
             await self._append_system_hint(
@@ -1085,7 +1326,7 @@ class LambdaCodingTUIApp(App[None]):
             indicator.update(label)
         except Exception:
             indicator = Static(label, id="queued-indicator")
-            await self.mount(indicator, before=self.query_one("#chat-input"))
+            await self.mount(indicator, before=self.query_one("#input-area"))
 
     async def _hide_queued_indicator(self) -> None:
         """Remove the queued message indicator."""
@@ -1096,7 +1337,7 @@ class LambdaCodingTUIApp(App[None]):
             pass
 
     async def on_key(self, event) -> None:
-        """Handle up-arrow for queued message."""
+        """Handle queued-message interrupts and path autocomplete navigation."""
         if event.key == "up" and self._queued_text:
             event.prevent_default()
             event.stop()
@@ -1106,17 +1347,50 @@ class LambdaCodingTUIApp(App[None]):
             if self._active_abort_signal:
                 self._active_abort_signal.abort("user sent new message")
             self._pending_user_text = text
+            return
+
+        try:
+            popup = self._path_autocomplete()
+        except Exception:
+            return
+        if not popup.display:
+            return
+        if event.key == "up":
+            event.prevent_default()
+            event.stop()
+            popup.action_cursor_up()
+        elif event.key == "down":
+            event.prevent_default()
+            event.stop()
+            popup.action_cursor_down()
+        elif event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self._hide_path_autocomplete()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Detect '/' typed in input to open command palette."""
-        if event.value == "/":
-            try:
-                inp = self.query_one("#chat-input", Input)
-                if inp.has_focus:
-                    inp.value = ""
-                    self.action_command_palette()
-            except Exception:
-                pass
+        """Detect '/' commands and update @ file path autocomplete."""
+        try:
+            inp = self._chat_input()
+        except Exception:
+            return
+        if event.input is not inp:
+            return
+        if event.value == "/" and inp.has_focus:
+            inp.value = ""
+            self._hide_path_autocomplete()
+            self.action_command_palette()
+            return
+        if self._suppress_path_autocomplete:
+            self._suppress_path_autocomplete = False
+            self._hide_path_autocomplete()
+            return
+        self._update_path_autocomplete()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list is self._path_autocomplete():
+            event.stop()
+            self._insert_path_completion(str(event.option.prompt))
 
     async def _clear_chat(self) -> None:
         chat_log = self.query_one("#main-chat-log", VerticalScroll)
@@ -1170,6 +1444,7 @@ class LambdaCodingTUIApp(App[None]):
                 session_id=self._current_session_id,
             )
             self.agent_func = new_agent
+            self._skill_count = int(getattr(new_agent, "_skill_count", 0) or 0)
             self.model_name = model_name
             self.context_window = context_window
             self.provider_id = provider_id
@@ -1178,6 +1453,27 @@ class LambdaCodingTUIApp(App[None]):
             self._schedule_auto_save()
         except Exception as e:
             self.notify(f"Failed to switch model: {e}", severity="error")
+
+    async def _refresh_skills(self) -> None:
+        """Refresh discovered skills by recreating the agent for future turns."""
+        from lambda_coding_agent.agent import create_agent
+
+        try:
+            new_agent = create_agent(
+                provider_path=self.provider_path,
+                workspace=self.workspace,
+                environment_block=self.environment_block,
+                model_name=self.model_name,
+                provider_id=self.provider_id,
+                session_id=self._current_session_id,
+            )
+            self.agent_func = new_agent
+            self._skill_count = int(getattr(new_agent, "_skill_count", 0) or 0)
+            self._update_status_bar()
+            if self.is_mounted:
+                await self._append_system_hint(f"Skills refreshed: {self._skill_count} loaded.")
+        except Exception as e:
+            self.notify(f"Failed to refresh skills: {e}", severity="error")
 
     async def _open_session_selector(self) -> None:
         """Open the session list modal."""
@@ -1262,6 +1558,7 @@ class LambdaCodingTUIApp(App[None]):
                     provider_id=saved_pid,
                     session_id=session_id,
                 )
+                self._skill_count = int(getattr(self.agent_func, "_skill_count", 0) or 0)
             except Exception:
                 pass
 
@@ -1318,7 +1615,7 @@ class LambdaCodingTUIApp(App[None]):
         self._update_status_bar()
 
         # Place the selected message in the input box
-        input_widget = self.query_one("#chat-input", Input)
+        input_widget = self._chat_input()
         input_widget.value = user_message_text
         input_widget.focus()
 
@@ -1596,7 +1893,7 @@ class LambdaCodingTUIApp(App[None]):
             await self._hide_working_indicator()
             self._busy = False
             self._active_abort_signal = None
-            input_widget = self.query_one("#chat-input", Input)
+            input_widget = self._chat_input()
             input_widget.focus()
             # Schedule auto-save after turn completes
             self._schedule_auto_save()

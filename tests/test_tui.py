@@ -1,6 +1,7 @@
 """Tests for custom TUI components."""
 
 import pytest
+from textual.widgets import Static
 
 from lambda_coding_agent.tui.tool_cards import (
     create_tool_card,
@@ -142,3 +143,64 @@ class TestLambdaCodingTUIApp:
         assert app._models == {}
         assert app._tools == {}
         assert app._fork_panes == {}
+
+    @pytest.mark.asyncio
+    async def test_status_bar_shows_loaded_skill_count(self):
+        def dummy_agent(message, history=None):
+            pass
+
+        dummy_agent._skill_count = 3
+        app = LambdaCodingTUIApp(
+            agent_func=dummy_agent,
+            workspace="/tmp/test",
+            model_name="gpt-4",
+        )
+
+        async with app.run_test():
+            status_right = app.query_one("#status-right", Static)
+            assert "skills: 3" in str(status_right.content)
+
+    @pytest.mark.asyncio
+    async def test_refresh_skills_recreates_agent_and_updates_status(self, monkeypatch):
+        def old_agent(message, history=None):
+            pass
+
+        def new_agent(message, history=None):
+            pass
+
+        old_agent._skill_count = 1
+        new_agent._skill_count = 4
+        calls = []
+
+        def fake_create_agent(**kwargs):
+            calls.append(kwargs)
+            return new_agent
+
+        monkeypatch.setattr("lambda_coding_agent.agent.create_agent", fake_create_agent)
+        app = LambdaCodingTUIApp(
+            agent_func=old_agent,
+            workspace="/tmp/test",
+            model_name="gpt-4",
+            provider_path="/tmp/provider.json",
+            provider_id="test_provider",
+            environment_block="env",
+        )
+        app.history = [{"role": "user", "content": "keep me"}]
+
+        async with app.run_test():
+            session_id = app._current_session_id
+            await app._refresh_skills()
+            status_right = app.query_one("#status-right", Static)
+
+            assert app.agent_func is new_agent
+            assert app.history == [{"role": "user", "content": "keep me"}]
+            assert app._skill_count == 4
+            assert "skills: 4" in str(status_right.content)
+            assert calls == [{
+                "provider_path": "/tmp/provider.json",
+                "workspace": "/tmp/test",
+                "environment_block": "env",
+                "model_name": "gpt-4",
+                "provider_id": "test_provider",
+                "session_id": session_id,
+            }]

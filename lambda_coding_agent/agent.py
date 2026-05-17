@@ -198,6 +198,8 @@ def create_agent(
         _stub_agent._tools = tools
         _stub_agent._system_prompt = system_prompt
         _stub_agent._repl = repl
+        _stub_agent._skill_catalog = skill_catalog
+        _stub_agent._skill_count = len(skill_catalog.skills)
         return _stub_agent
 
     # Define agent function with dynamic docstring via closure
@@ -219,5 +221,7 @@ def create_agent(
     decorated._repl = repl
     decorated._build_runtime_toolkit = _build_runtime_toolkit
     decorated._environment_block = environment_block
+    decorated._skill_catalog = skill_catalog
+    decorated._skill_count = len(skill_catalog.skills)
 
     return decorated

@@ -161,6 +161,7 @@ class TestSkillCatalogPrompt:
             environment_block="## Environment\n- test",
         )
 
+        assert agent._skill_count == 1
         assert "<available_skills>" in agent._system_prompt
         assert "code-review" in agent._system_prompt
         assert "Review code changes" in agent._system_prompt
@@ -176,4 +177,5 @@ class TestSkillCatalogPrompt:
             environment_block="## Environment\n- test",
         )
 
+        assert agent._skill_count == 0
         assert "<available_skills>" not in agent._system_prompt
