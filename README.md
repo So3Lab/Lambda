@@ -1,5 +1,7 @@
 # LambdaCodingAgent
 
+![LambdaCodingAgent repository cover](https://github.com/So3Lab/Lambda/blob/master/repository-cover.png?raw=true)
+
 LambdaCodingAgent is a local-first coding agent CLI/TUI. It gives an LLM a persistent Python REPL, workspace-scoped runtime primitives, file-backed plans, session history, and a Textual interface for supervising coding work in a repository.
 
 The current implementation is a CodeAct-style agent built on SimpleLLMFunc: the model normally receives one `execute_code` tool, and file, shell, search, web fetch, and plan operations are called inside that REPL as `runtime.workspace.*` primitives.
