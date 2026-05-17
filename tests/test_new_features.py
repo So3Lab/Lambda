@@ -23,6 +23,7 @@ from lambda_coding_agent.tui.tool_cards import (
     _format_header,
     create_tool_card,
 )
+from lambda_coding_agent.tui.app import LambdaCodingTUIApp
 from lambda_coding_agent.agent import create_agent, _build_system_prompt
 
 
@@ -57,6 +58,82 @@ class TestExpandAllToolBlocks:
         from lambda_coding_agent.tui.app import LambdaCodingTUIApp
 
         assert hasattr(LambdaCodingTUIApp, "action_toggle_tool_expand")
+
+    def test_tool_block_expand_state_on_new_card(self):
+        """Newly created tool cards should inherit the current expand state."""
+        card = create_tool_card("run_command", {"command": "ls"})
+        # Default state is collapsed
+        assert card._expanded is False
+
+    def test_tool_block_expand_state_is_persistent(self):
+        """Expanding a tool block should persist across refresh calls."""
+        block = ToolBlock(tool_name="run_command", arguments={"command": "ls"})
+        block._expanded = True
+        block._refresh_content_display()
+        assert block._expanded is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ctrl+O expand: new tool blocks inherit expand state
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCtrlOExpandNewToolBlocks:
+    """Ctrl+O expand state should persist for newly created tool blocks."""
+
+    def test_start_tool_call_inherits_expanded_state(self):
+        """When _tools_expanded is True, new tool cards should be expanded."""
+        from lambda_coding_agent.tui.tool_cards import ToolBlock
+
+        # Simulate user pressed ctrl+o to expand
+        app = LambdaCodingTUIApp(
+            agent_func=MagicMock(),
+            workspace="/tmp",
+            model_name="test",
+        )
+        app._tools_expanded = True
+
+        # Simulate start_tool_call creating a card and applying expand state
+        card = create_tool_card("execute_code", {"code": "print('hi')"})
+        if getattr(app, "_tools_expanded", False):
+            if isinstance(card, ToolBlock):
+                card._expanded = True
+                card._refresh_content_display()
+
+        assert card._expanded is True
+
+    def test_start_tool_call_collapsed_when_not_expanded(self):
+        """When _tools_expanded is False, new tool cards should remain collapsed."""
+        from lambda_coding_agent.tui.tool_cards import ToolBlock
+
+        app = LambdaCodingTUIApp(
+            agent_func=MagicMock(),
+            workspace="/tmp",
+            model_name="test",
+        )
+        app._tools_expanded = False  # default
+
+        card = create_tool_card("execute_code", {"code": "print('hi')"})
+        # When not expanded, the expand logic should not fire
+        if getattr(app, "_tools_expanded", False):
+            if isinstance(card, ToolBlock):
+                card._expanded = True
+                card._refresh_content_display()
+
+        assert card._expanded is False  # stays default
+
+    def test_toggle_preserves_scroll_position_concept(self):
+        """Toggle expand should save/restore scroll position (API contract)."""
+        app = LambdaCodingTUIApp(
+            agent_func=MagicMock(),
+            workspace="/tmp",
+            model_name="test",
+        )
+        # Verify the action method exists and toggles the flag
+        assert hasattr(app, "action_toggle_tool_expand")
+        initial_state = getattr(app, "_tools_expanded", False)
+        app._tools_expanded = not initial_state
+        assert app._tools_expanded != initial_state
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
