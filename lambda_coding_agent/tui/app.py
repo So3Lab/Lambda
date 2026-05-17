@@ -382,6 +382,8 @@ class LambdaCodingTUIApp(App[None]):
         self.provider_id = provider_id
         self.environment_block = environment_block
         self.context_window = context_window
+        self._git_info_cache: str | None = None
+        self._git_refresh_pending = False
         self.history: MessageList = []
         self._busy = False
         self._active_abort_signal: AbortSignal | None = None
@@ -450,18 +452,27 @@ class LambdaCodingTUIApp(App[None]):
             await self._do_auto_save()
 
     def _scroll_to_bottom(self, scroll_widget: VerticalScroll | None = None) -> None:
-        """Scroll to bottom only if auto-scroll is enabled."""
-        if not self._auto_scroll:
-            return
+        """Scroll to bottom only if user is already at or near the bottom.
+
+        This allows the user to stop auto-scroll by scrolling up at any time.
+        Auto-scroll re-enables when the user scrolls back to the bottom.
+        """
         if scroll_widget is None:
             scroll_widget = self.query_one("#main-chat-log", VerticalScroll)
+        # Only scroll if already at or near bottom — this lets the user
+        # "opt out" of auto-scroll by scrolling up.
+        if not self._is_at_bottom(scroll_widget):
+            return
         scroll_widget.scroll_end(animate=False)
+        self._auto_scroll = True
 
     def _is_at_bottom(self, scroll_widget: VerticalScroll) -> bool:
-        """Check if scroll is at or near the bottom."""
-        return scroll_widget.scroll_offset.y >= (
-            scroll_widget.virtual_size.height - scroll_widget.size.height - 2
-        )
+        """Check if scroll is at or near the bottom (within 5 rows)."""
+        max_y = scroll_widget.max_scroll_y
+        if max_y <= 0:
+            return True  # Nothing to scroll, treat as at bottom
+        current_y = scroll_widget.scroll_y
+        return current_y >= max_y - 5
 
     def on_vertical_scroll_scroll_up(self, event) -> None:
         """User scrolled up — disable auto-scroll."""
@@ -500,8 +511,9 @@ class LambdaCodingTUIApp(App[None]):
 
     def _update_status_bar(self) -> None:
         left = f"  {self.workspace}"
-        if self.git_info:
-            left += f"  |  {self.git_info}"
+        git = self._git_info_cache or self.git_info
+        if git:
+            left += f"  |  {git}"
         right = f"model: {self.model_name}"
         if self._last_prompt_tokens > 0 and self.context_window > 0:
             pct = int(self._last_prompt_tokens * 100 / self.context_window)
@@ -509,6 +521,49 @@ class LambdaCodingTUIApp(App[None]):
         right += "  "
         self.query_one("#status-left", Static).update(left)
         self.query_one("#status-right", Static).update(right)
+
+    def _refresh_git_info(self) -> None:
+        """Synchronously query git status for the status bar."""
+        import subprocess
+
+        try:
+            branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.workspace,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if branch.returncode != 0:
+                self._git_info_cache = ""
+                return
+            branch_name = branch.stdout.strip()
+
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=self.workspace,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            lines = [l for l in status.stdout.strip().split("\n") if l.strip()]
+            modified = len(lines)
+            clean = "clean" if modified == 0 else f"{modified} modified"
+            self._git_info_cache = f"{branch_name}, {clean}"
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            self._git_info_cache = ""
+
+    def _schedule_git_refresh(self) -> None:
+        """Debounce git status refresh — runs once after DOM refresh."""
+        if self._git_refresh_pending:
+            return
+        self._git_refresh_pending = True
+        self.call_after_refresh(self._do_git_refresh)
+
+    def _do_git_refresh(self) -> None:
+        self._git_refresh_pending = False
+        self._refresh_git_info()
+        self._update_status_bar()
 
     def action_interrupt(self) -> None:
         """Handle escape key: abort the current agent turn."""
@@ -522,18 +577,31 @@ class LambdaCodingTUIApp(App[None]):
         input_widget.focus()
 
     def action_toggle_tool_expand(self) -> None:
-        """Toggle expand/collapse on ALL ToolBlock widgets."""
+        """Toggle expand/collapse on ALL ToolBlock widgets, preserving scroll position."""
         from lambda_coding_agent.tui.tool_cards import ToolBlock
+
+        # Save scroll position before changing content height
+        chat_log = self.query_one("#main-chat-log", VerticalScroll)
+        saved_scroll_y = chat_log.scroll_y
 
         self._tools_expanded = not getattr(self, "_tools_expanded", False)
         try:
-            blocks = self.query("ToolBlock")
-            for block in blocks:
+            for block in chat_log.query(ToolBlock):
                 if isinstance(block, ToolBlock):
                     block._expanded = self._tools_expanded
                     block._refresh_content_display()
+            # Also check fork panes
+            for pane in self._fork_panes.values():
+                if pane.bubble:
+                    for block in pane.bubble.query(ToolBlock):
+                        if isinstance(block, ToolBlock):
+                            block._expanded = self._tools_expanded
+                            block._refresh_content_display()
         except Exception:
             pass
+
+        # Restore scroll position after content height changes
+        chat_log.scroll_to(y=saved_scroll_y, animate=False)
 
     # ── Working indicator & tab labels ─────────────────────────
 
@@ -799,6 +867,13 @@ class LambdaCodingTUIApp(App[None]):
         card = create_tool_card(tool_name=tool_name, arguments=arguments)
         state.card = card
 
+        # Apply current expand/collapse state to newly created tool blocks
+        if getattr(self, "_tools_expanded", False):
+            from lambda_coding_agent.tui.tool_cards import ToolBlock
+            if isinstance(card, ToolBlock):
+                card._expanded = True
+                card._refresh_content_display()
+
         model_state = self._models.get(model_call_id)
         if model_state and model_state.bubble:
             await model_state.bubble.mount(card)
@@ -872,6 +947,10 @@ class LambdaCodingTUIApp(App[None]):
         if tool_name.startswith("plan_") or tool_name == "execute_code":
             if self.plan_panel is not None:
                 self.plan_panel.refresh_if_active()
+
+        # Refresh git status after execute_code (may modify files)
+        if tool_name == "execute_code":
+            self._schedule_git_refresh()
 
     # ── Rendering helpers ─────────────────────────────────────
 
@@ -986,6 +1065,9 @@ class LambdaCodingTUIApp(App[None]):
         await bubble.mount(role, body)
 
         self._scroll_to_bottom(chat_log)
+
+        # Refresh git status — previous agent turn may have modified files
+        self._schedule_git_refresh()
 
         # Clean up finished fork panes from previous turn
         await self._cleanup_finished_forks()
@@ -1348,6 +1430,12 @@ class LambdaCodingTUIApp(App[None]):
                         else:
                             tc_args = getattr(tc, "arguments", {})
                         card = create_tool_card(tool_name=tc_name, arguments=tc_args)
+                        # Apply current expand/collapse state
+                        if getattr(self, "_tools_expanded", False):
+                            from lambda_coding_agent.tui.tool_cards import ToolBlock
+                            if isinstance(card, ToolBlock):
+                                card._expanded = True
+                                card._refresh_content_display()
                         await bubble.mount(card)
 
             elif role == "tool":
