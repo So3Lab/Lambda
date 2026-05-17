@@ -141,6 +141,11 @@ class TestPlanningMindset:
         prompt = _build_system_prompt()
         assert "Code Execution Model" in prompt
 
+    def test_prompt_mentions_web_fetch(self):
+        """System prompt should mention the web_fetch primitive."""
+        prompt = _build_system_prompt()
+        assert "web_fetch" in prompt
+
     def test_prompt_mentions_runtime_workspace(self):
         """System prompt should mention runtime.workspace primitives."""
         prompt = _build_system_prompt()

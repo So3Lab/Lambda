@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lambda_coding_agent.tools.webfetch import _web_fetch_sync
+
 from SimpleLLMFunc.runtime.primitives import (
     PrimitiveCallContext,
     PrimitivePack,
@@ -487,6 +489,53 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         if not output_parts:
             return "No matches found."
         return "\n".join(output_parts)
+
+    # ── Web: fetch ─────────────────────────────────────────────────
+
+    @pack.primitive("web_fetch")
+    def ws_web_fetch(
+        ctx: PrimitiveCallContext,
+        url: str,
+        timeout: int = 20,
+        max_chars: int = 20000,
+    ) -> str:
+        """
+        Use: Fetch an HTTP/HTTPS URL and return readable text.
+        Input: `url: str`, `timeout: int` (default 20), `max_chars: int` (default 20000).
+        Output: Structured text with success, status_code, final_url, content_type, truncated, error, and fetched text.
+        Parse: Check success first. If false, read error. If true, read text under "--- text ---".
+        Parameters:
+        - url: Absolute http:// or https:// URL to fetch.
+        - timeout: Max seconds before giving up. Capped to 120 seconds.
+        - max_chars: Max response text chars to return. Capped to 20000.
+        Best Practices:
+        - Use only for public HTTP/HTTPS documentation or pages the user asks you to inspect.
+        - Do not fetch local files, internal metadata URLs, or URLs containing secrets.
+        - Prefer official docs and cite the final_url in your response when relevant.
+        - Use max_chars to keep large pages concise; if truncated, fetch a more specific page or section.
+        - For binary or unsupported content types, use the browser or shell only if the user explicitly requests it.
+        Output Example:
+          success: True
+          status_code: 200
+          final_url: https://example.com/
+          content_type: text/html; charset=utf-8
+          truncated: False
+          --- text ---
+          Example Domain
+        """
+        result = _web_fetch_sync(url=url, timeout=timeout, max_chars=max_chars)
+        lines = [
+            f"success: {result['success']}",
+            f"status_code: {result['status_code']}",
+            f"final_url: {result['final_url']}",
+            f"content_type: {result['content_type']}",
+            f"truncated: {result['truncated']}",
+        ]
+        if result["error"]:
+            lines.extend(["--- error ---", result["error"]])
+        if result["text"]:
+            lines.extend(["--- text ---", result["text"]])
+        return "\n".join(lines)
 
     # ── Plan: create ───────────────────────────────────────────────
 

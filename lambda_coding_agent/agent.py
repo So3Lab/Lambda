@@ -44,6 +44,7 @@ All workspace operations are available as runtime primitives, called inside exec
   runtime.workspace.write_file("file.py", content)     — create/overwrite files
   runtime.workspace.find_files("**/*.py")              — glob patterns
   runtime.workspace.search("pattern", glob="*.py")     — regex search
+  runtime.workspace.web_fetch("https://example.com")    — fetch public HTTP/HTTPS pages
   runtime.workspace.plan_create("Title", "Goal", tasks='[{{"title":"T1","description":"...","execution_mode":"main_agent","depends_on":[]}}]')
   runtime.workspace.plan_get(view="summary")           — "summary" | "ready" | "full"
   runtime.workspace.plan_update_task(task_id="task_001", status="completed")
