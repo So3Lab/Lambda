@@ -113,4 +113,22 @@ class TestWebFetch:
         )
         result = entry.handler(ctx, f"{server_url}/text")
         assert "success: True" in result
+        assert "saved_path: .lambda/webfetch/" in result
+        assert "--- preview ---" in result
         assert "plain response" in result
+
+    def test_workspace_web_fetch_saves_full_content_and_returns_preview(self, server_url, tmp_path):
+        pack = build_workspace_pack(str(tmp_path))
+        entry = next(e for e in pack.primitives if e.name == "workspace.web_fetch")
+        ctx = PrimitiveCallContext(
+            primitive_name="workspace.web_fetch",
+            call_id="test",
+            execution_id="test",
+            backend=pack.backend,
+        )
+        result = entry.handler(ctx, f"{server_url}/large", max_chars=10, output_path="fetches/large.txt")
+        assert "success: True" in result
+        assert "saved_path: fetches/large.txt" in result
+        assert "preview_truncated: True" in result
+        assert "--- preview ---" in result
+        assert (tmp_path / "fetches" / "large.txt").read_text() == "x" * 100

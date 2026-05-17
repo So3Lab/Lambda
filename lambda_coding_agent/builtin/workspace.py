@@ -498,43 +498,81 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         url: str,
         timeout: int = 20,
         max_chars: int = 20000,
+        output_path: str = "",
     ) -> str:
         """
-        Use: Fetch an HTTP/HTTPS URL and return readable text.
-        Input: `url: str`, `timeout: int` (default 20), `max_chars: int` (default 20000).
-        Output: Structured text with success, status_code, final_url, content_type, truncated, error, and fetched text.
-        Parse: Check success first. If false, read error. If true, read text under "--- text ---".
+        Use: Fetch an HTTP/HTTPS URL, save full readable text to a workspace file, and return a short preview.
+        Input: `url: str`, `timeout: int` (default 20), `max_chars: int` (preview chars, default 20000), `output_path: str` (optional).
+        Output: Structured text with success, status_code, final_url, content_type, saved_path, preview_truncated, error, and preview text.
+        Parse: Check success first. If true, read saved_path and use read_file on it for the full content; preview is under "--- preview ---".
         Parameters:
         - url: Absolute http:// or https:// URL to fetch.
         - timeout: Max seconds before giving up. Capped to 120 seconds.
-        - max_chars: Max response text chars to return. Capped to 20000.
+        - max_chars: Max preview chars to return. Capped to 20000.
+        - output_path: Workspace-relative file path for the full fetched text. Empty writes under .lambda/webfetch/.
         Best Practices:
+        - Save the full fetched content to a file and print only a truncated preview plus saved_path.
+        - Inspect the full content incrementally with read_file(saved_path, offset=..., limit=...).
         - Use only for public HTTP/HTTPS documentation or pages the user asks you to inspect.
         - Do not fetch local files, internal metadata URLs, or URLs containing secrets.
         - Prefer official docs and cite the final_url in your response when relevant.
-        - Use max_chars to keep large pages concise; if truncated, fetch a more specific page or section.
-        - For binary or unsupported content types, use the browser or shell only if the user explicitly requests it.
         Output Example:
           success: True
           status_code: 200
           final_url: https://example.com/
-          content_type: text/html; charset=utf-8
-          truncated: False
-          --- text ---
+          saved_path: .lambda/webfetch/example_com.txt
+          preview_truncated: False
+          --- preview ---
           Example Domain
         """
-        result = _web_fetch_sync(url=url, timeout=timeout, max_chars=max_chars)
+        import hashlib
+        import time as _time
+
+        backend: WorkspaceBackend = ctx.backend
+        result = _web_fetch_sync(
+            url=url,
+            timeout=timeout,
+            max_chars=max_chars,
+            truncate_text=False,
+        )
+        preview_limit = max(1, min(max_chars, 20000))
+        saved_path = ""
+        write_error = ""
+        if result["success"]:
+            if output_path:
+                abs_path, err = backend._resolve_path(output_path)
+                if err:
+                    write_error = err
+                    result["success"] = False
+                    result["error"] = err
+                    abs_path = None
+                else:
+                    saved_path = output_path
+            else:
+                digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+                saved_path = f".lambda/webfetch/{int(_time.time())}_{digest}.txt"
+                abs_path, _ = backend._resolve_path(saved_path)
+            if result["success"] and abs_path is not None:
+                abs_path.parent.mkdir(parents=True, exist_ok=True)
+                abs_path.write_text(result["text"], encoding="utf-8")
+
+        preview = result["text"]
+        preview_truncated = len(preview) > preview_limit
+        if preview_truncated:
+            preview = preview[:preview_limit] + "\n... [preview truncated; read saved_path for full content]"
+
         lines = [
             f"success: {result['success']}",
             f"status_code: {result['status_code']}",
             f"final_url: {result['final_url']}",
             f"content_type: {result['content_type']}",
-            f"truncated: {result['truncated']}",
+            f"saved_path: {saved_path}",
+            f"preview_truncated: {preview_truncated}",
         ]
-        if result["error"]:
-            lines.extend(["--- error ---", result["error"]])
-        if result["text"]:
-            lines.extend(["--- text ---", result["text"]])
+        if result["error"] or write_error:
+            lines.extend(["--- error ---", result["error"] or write_error])
+        if preview:
+            lines.extend(["--- preview ---", preview])
         return "\n".join(lines)
 
     # ── Plan: create ───────────────────────────────────────────────

@@ -62,6 +62,7 @@ def _web_fetch_sync(
     url: str,
     timeout: int = 20,
     max_chars: int = MAX_OUTPUT_CHARS,
+    truncate_text: bool = True,
 ) -> dict:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -152,7 +153,7 @@ def _web_fetch_sync(
     if "html" in content_type.lower():
         text = _html_to_text(text)
 
-    char_truncated = len(text) > safe_max_chars
+    char_truncated = truncate_text and len(text) > safe_max_chars
     if char_truncated:
         text = text[:safe_max_chars] + "\n... [content truncated]"
 
