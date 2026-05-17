@@ -1,5 +1,7 @@
 # System Prompt Design
 
+> Historical prompt design draft: the current prompt lives in `lambda_coding_agent/agent.py` and includes CodeAct runtime primitives, planning, forks, and skills. For the current source-of-truth project map, see [Current Implementation Map](current-implementation.md).
+
 ## Philosophy
 
 The system prompt is the agent's constitution. It should be:

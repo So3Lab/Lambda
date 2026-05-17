@@ -1,5 +1,7 @@
 # Key Design Decisions
 
+> Historical decisions note: some decisions evolved with the current CodeAct/PyRepl runtime and custom TUI. For the current source-of-truth project map, see [Current Implementation Map](current-implementation.md).
+
 ## Why Not Just Extend tui_general_agent_example.py?
 
 The example is a demo of SimpleLLMFunc capabilities (PyRepl, SelfRef, Fork). A good coding agent has different priorities:

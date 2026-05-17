@@ -1,5 +1,7 @@
 # Phase 1 Implementation Guide
 
+> Historical implementation guide: this describes the original Phase 1 plan. For the current source-of-truth project map, see [Current Implementation Map](current-implementation.md).
+
 ## Goal
 
 A working coding agent CLI that can:

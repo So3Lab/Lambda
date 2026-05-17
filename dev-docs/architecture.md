@@ -1,5 +1,7 @@
 # LambdaCodingAgent - Architecture Plan
 
+> Historical planning note: this file predates the current CodeAct/PyRepl runtime and custom TUI implementation. For the current source-of-truth project map, see [Current Implementation Map](current-implementation.md).
+
 ## Vision
 
 A terminal-native coding agent that feels like a fast, knowledgeable pair programmer. It operates inside your project, understands your codebase, runs your tools, and edits your code — all through a Textual TUI or headless stdio mode.
