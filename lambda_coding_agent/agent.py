@@ -9,6 +9,7 @@ from SimpleLLMFunc.runtime.selfref import (
 )
 
 from lambda_coding_agent.builtin.workspace import build_workspace_pack
+from lambda_coding_agent.skills import build_skill_catalog_block, discover_skills
 
 MEMORY_KEY = "agent_main"
 
@@ -22,8 +23,9 @@ def _make_tools(workspace: str, session_id: str | None = None):
     return []
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(skill_catalog_block: str = "") -> str:
     """Build the system prompt for the coding agent."""
+    skills_section = f"\n{skill_catalog_block}\n" if skill_catalog_block else ""
     return f"""You are a coding agent operating in the user's terminal.
 You have direct access to their project files and can run shell commands.
 
@@ -132,7 +134,7 @@ When using fork subagents:
 ## Style
 - Be concise. Lead with the action or answer.
 - Show reasoning only when it helps understanding.
-
+{skills_section}
 {{environment_block}}
 """
 
@@ -174,7 +176,8 @@ def create_agent(
             llm = None
 
     tools = _make_tools(workspace)
-    system_prompt = _build_system_prompt()
+    skill_catalog = discover_skills(workspace)
+    system_prompt = _build_system_prompt(build_skill_catalog_block(skill_catalog.skills))
 
     # Create persistent Python REPL with runtime primitives (selfref)
     repl = PyRepl(working_directory=workspace)

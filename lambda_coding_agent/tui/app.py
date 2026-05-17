@@ -345,12 +345,11 @@ class LambdaCodingTUIApp(App[None]):
     }
 
     #queued-indicator {
-        dock: bottom;
         height: auto;
         background: #2a8c8c;
         color: #0f1115;
         padding: 0 1;
-        margin: 0 1;
+        margin: 0 0 1 0;
     }
     """
 
@@ -1086,7 +1085,7 @@ class LambdaCodingTUIApp(App[None]):
             indicator.update(label)
         except Exception:
             indicator = Static(label, id="queued-indicator")
-            await self.mount(indicator, before=self.query_one("#status-bar"))
+            await self.mount(indicator, before=self.query_one("#chat-input"))
 
     async def _hide_queued_indicator(self) -> None:
         """Remove the queued message indicator."""
