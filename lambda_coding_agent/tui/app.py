@@ -11,17 +11,13 @@ import asyncio
 import json
 import os
 import re
-import shutil
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable, Optional
 
 from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.binding import Binding
-from textual.geometry import Offset, Region, Size, clamp
-from textual.reactive import reactive
+from textual.events import MouseScrollUp
 from textual.screen import Screen
 from textual.widgets import Input, Markdown, OptionList, Static, TabbedContent, TabPane
 
@@ -36,14 +32,13 @@ from SimpleLLMFunc.utils.tui.formatters import (
     format_tool_stats,
 )
 
+from lambda_coding_agent.tui.chat_input import ChatInput
 from lambda_coding_agent.tui.tool_cards import create_tool_card
+from lambda_coding_agent.tui.theme import terminal_theme_from_textual_theme
 from lambda_coding_agent.tui.session import SessionManager
 from lambda_coding_agent.tui.plan_panel import PlanPanel
 from lambda_coding_agent.tools.plan import PlanManager
 
-from rich.cells import cell_len, get_character_cell_size
-from textual.expand_tabs import expand_tabs_inline
-from textual.widgets._input import Selection
 
 
 def _patch_markdown_append() -> None:
@@ -163,111 +158,33 @@ def _extract_fork_id_from_tool(tool_call_id: str) -> str | None:
     return parts[0] if parts else None
 
 
-class ChatInput(Input):
-    """Multi-line chat input that submits on Enter and inserts newlines on Shift+Enter."""
+class LazyHistoryScroll(VerticalScroll):
+    """Scroll container that notifies the app before moving into older history."""
 
-    BINDINGS = [
-        *Input.BINDINGS,
-        Binding("shift+enter", "insert_newline", "Insert newline", show=False),
-        Binding("up", "cursor_up", "Cursor up", show=False),
-        Binding("down", "cursor_down", "Cursor down", show=False),
-        Binding("shift+up", "cursor_up(True)", "Select up", show=False),
-        Binding("shift+down", "cursor_down(True)", "Select down", show=False),
-    ]
+    def _maybe_expand_history(self) -> None:
+        app = self.app
+        if hasattr(app, "_request_render_window_expansion"):
+            app._request_render_window_expansion()
 
-    @property
-    def _line_count(self) -> int:
-        return max(1, self.value.count("\n") + 1)
+    def action_scroll_up(self) -> None:
+        self._maybe_expand_history()
+        super().action_scroll_up()
 
-    def _line_starts(self) -> list[int]:
-        starts = [0]
-        for index, char in enumerate(self.value):
-            if char == "\n":
-                starts.append(index + 1)
-        return starts
+    def scroll_up(self, *args: Any, **kwargs: Any) -> None:
+        self._maybe_expand_history()
+        return super().scroll_up(*args, **kwargs)
 
-    def _position_to_line_column(self, position: int) -> tuple[int, int]:
-        starts = self._line_starts()
-        line = 0
-        for index, start in enumerate(starts):
-            if start > position:
-                break
-            line = index
-        return line, position - starts[line]
+    def scroll_page_up(self, *args: Any, **kwargs: Any) -> None:
+        self._maybe_expand_history()
+        return super().scroll_page_up(*args, **kwargs)
 
-    def _line_column_to_position(self, line: int, column: int) -> int:
-        starts = self._line_starts()
-        lines = self.value.split("\n")
-        line = int(clamp(line, 0, len(starts) - 1))
-        column = int(clamp(column, 0, len(lines[line])))
-        return starts[line] + column
+    def scroll_home(self, *args: Any, **kwargs: Any) -> None:
+        self._maybe_expand_history()
+        return super().scroll_home(*args, **kwargs)
 
-    def _position_to_cell(self, position: int) -> int:
-        line, column = self._position_to_line_column(position)
-        line_text = self.value.split("\n")[line]
-        return cell_len(expand_tabs_inline(line_text[:column], 4))
-
-    def _cell_offset_to_index(self, offset: int) -> int:
-        line, _ = self._position_to_line_column(self.cursor_position)
-        line_text = self.value.split("\n")[line]
-        cell_offset = 0
-        scroll_x, _ = self.scroll_offset
-        offset += int(scroll_x)
-        for index, char in enumerate(line_text):
-            cell_width = get_character_cell_size(char)
-            if cell_offset <= offset < cell_offset + cell_width:
-                return self._line_column_to_position(line, index)
-            cell_offset += cell_width
-        return self._line_column_to_position(line, int(clamp(offset, 0, len(line_text))))
-
-    @property
-    def cursor_screen_offset(self) -> Offset:
-        x, y, _width, _height = self.content_region
-        scroll_x, scroll_y = self.scroll_offset
-        line, _ = self._position_to_line_column(self.cursor_position)
-        return Offset(x + self._cursor_offset - int(scroll_x), y + line - int(scroll_y))
-
-    def _watch_value(self, value: str) -> None:
-        super()._watch_value(value)
-        self.virtual_size = Size(self.content_width, self._line_count)
-
-    def _watch_selection(self, selection: Selection) -> None:
-        self.app.clear_selection()
-        self.app.cursor_position = self.cursor_screen_offset
-        if not self._initial_value:
-            line, _ = self._position_to_line_column(self.cursor_position)
-            self.scroll_to_region(
-                Region(self._cursor_offset, line, width=1, height=1),
-                force=True,
-                animate=False,
-            )
-
-    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
-        return self._line_count
-
-    def action_insert_newline(self) -> None:
-        self.insert_text_at_cursor("\n")
-
-    def action_cursor_up(self, select: bool = False) -> None:
-        line, column = self._position_to_line_column(self.cursor_position)
-        if line <= 0:
-            return
-        position = self._line_column_to_position(line - 1, column)
-        if select:
-            self.selection = Selection(self.selection.start, position)
-        else:
-            self.selection = Selection.cursor(position)
-
-    def action_cursor_down(self, select: bool = False) -> None:
-        line, column = self._position_to_line_column(self.cursor_position)
-        if line >= self._line_count - 1:
-            return
-        position = self._line_column_to_position(line + 1, column)
-        if select:
-            self.selection = Selection(self.selection.start, position)
-        else:
-            self.selection = Selection.cursor(position)
-
+    def _on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        self._maybe_expand_history()
+        super()._on_mouse_scroll_up(event)
 
 @dataclass
 class _ModelState:
@@ -330,7 +247,7 @@ class LambdaCodingTUIApp(App[None]):
     """
 
     CSS = """
-    Screen { layout: vertical; background: #0f1115; }
+    Screen { layout: vertical; background: $background; color: $text; }
 
     #agent-tabs {
         height: 1fr;
@@ -342,22 +259,22 @@ class LambdaCodingTUIApp(App[None]):
     }
 
     #agent-tabs ContentTabs {
-        background: #1a1d24;
+        background: $panel;
         height: 2;
     }
 
     #agent-tabs ContentTabs Underline .underline--bar {
-        color: #6f87a8;
-        background: #2a2f3a;
+        color: $primary;
+        background: $primary-background;
     }
 
     #agent-tabs Tab {
-        color: #8b95a7;
+        color: $text-muted;
         padding: 0 2;
     }
 
     #agent-tabs Tab.-active {
-        color: #e0e6f0;
+        color: $text;
         text-style: bold;
     }
 
@@ -365,6 +282,37 @@ class LambdaCodingTUIApp(App[None]):
         height: 1fr;
         padding: 0 1;
         overflow-y: auto;
+    }
+
+    #lambda-logo {
+        width: 100%;
+        height: 1fr;
+        align: center middle;
+        content-align: center middle;
+        color: $primary;
+        text-style: bold;
+    }
+
+    #lambda-logo-mark {
+        width: 100%;
+        height: auto;
+        content-align: center middle;
+        color: $accent;
+    }
+
+    #lambda-logo-title {
+        width: 100%;
+        height: 1;
+        content-align: center middle;
+        color: $text;
+        text-style: bold;
+    }
+
+    #lambda-logo-subtitle {
+        width: 100%;
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
     }
 
     .fork-chat-log {
@@ -377,8 +325,8 @@ class LambdaCodingTUIApp(App[None]):
         dock: bottom;
         height: auto;
         layout: horizontal;
-        background: #1a1d24;
-        color: #8b95a7;
+        background: $panel;
+        color: $text-muted;
         padding: 0 1;
     }
 
@@ -394,27 +342,27 @@ class LambdaCodingTUIApp(App[None]):
         display: none;
         max-height: 8;
         margin: 0 1;
-        border: tall #6f87a8;
+        border: tall $border;
     }
 
     #chat-input {
         height: auto;
         max-height: 8;
         margin: 0 1 1 1;
-        border: tall #6f87a8;
+        border: tall $border;
     }
 
     .bubble {
         height: auto;
         margin: 0 0 1 0;
         padding: 1;
-        border: round #3a4252;
-        background: #151922;
+        border: round $border-blurred;
+        background: $surface;
     }
 
     .user-bubble {
-        border: round #5f8d5a;
-        background: #152019;
+        border: round $success;
+        background: $success-muted;
     }
 
     .model-bubble {
@@ -431,48 +379,50 @@ class LambdaCodingTUIApp(App[None]):
 
     .model-bubble MarkdownFence {
         margin: 1 0;
+        color: $text;
+        background: $panel;
     }
 
     .role {
         text-style: bold;
-        color: #a8b8d0;
+        color: $foreground;
         margin: 0 0 1 0;
     }
 
     .reasoning {
-        color: #7f8798;
+        color: $text-muted;
         margin: 0 0 1 0;
     }
 
     .system-hint {
-        color: #d4a373;
+        color: $text-warning;
         margin: 1 0;
         text-style: italic;
     }
 
     .fork-header {
-        color: #a8b8d0;
+        color: $foreground;
         text-style: bold;
         margin: 0 0 1 0;
     }
 
     .working-indicator {
-        color: #6f87a8;
+        color: $text-primary;
         text-style: italic;
         margin: 0 0 1 0;
         padding: 0 1;
     }
 
     .usage-footer {
-        color: #6f87a8;
+        color: $text-primary;
         text-style: italic;
         margin: 1 0 0 0;
     }
 
     #queued-indicator {
         height: auto;
-        background: #2a8c8c;
-        color: #0f1115;
+        background: $accent;
+        color: $background;
         padding: 0 1;
         margin: 0 0 1 0;
     }
@@ -528,6 +478,11 @@ class LambdaCodingTUIApp(App[None]):
         # Session management
         self.session_manager = SessionManager(self.workspace)
         self._current_session_id: str | None = None
+        self._current_session_has_user_message: bool = False
+        self._message_nodes: dict[str, dict[str, Any]] = {}
+        self._active_leaf_id: str | None = None
+        self._next_message_seq: int = 1
+        self._last_saved_history_len: int = 0
         self._save_timer: asyncio.TimerHandle | None = None
 
         # Plan management (session-scoped)
@@ -536,6 +491,26 @@ class LambdaCodingTUIApp(App[None]):
         self._save_debounce_secs = 30.0
         self._name_generated: bool = False
         self._original_session_name: str = ""  # for fork naming
+        self._last_escape_at: datetime | None = None
+        self._logo_visible = False
+        self._initial_render_message_count = 8
+        self._max_render_message_count = 20
+        self._render_window_start = 0
+        self._render_window_end = 0
+        self._rendering_history_window = False
+        self._live_turn_user_index: int | None = None
+        self._live_model_history_indices: dict[str, int] = {}
+        self._live_tool_history_indices: dict[str, int] = {}
+
+
+    def _apply_theme_palette_to_rich(self) -> None:
+        terminal_theme = terminal_theme_from_textual_theme(self.current_theme)
+        self.ansi_theme_dark = terminal_theme
+        self.ansi_theme_light = terminal_theme
+
+    def _watch_theme(self, theme_name: str) -> None:
+        super()._watch_theme(theme_name)
+        self._apply_theme_palette_to_rich()
 
     def _recreate_plan_manager(self) -> None:
         """Recreate PlanManager with the current session_id."""
@@ -548,7 +523,7 @@ class LambdaCodingTUIApp(App[None]):
         yield self.plan_panel
         with TabbedContent(id="agent-tabs", initial="main-pane"):
             with TabPane("Main", id="main-pane"):
-                yield VerticalScroll(id="main-chat-log")
+                yield LazyHistoryScroll(id="main-chat-log")
         with Container(id="input-area"):
             yield OptionList(id="path-autocomplete")
             yield ChatInput(
@@ -569,29 +544,70 @@ class LambdaCodingTUIApp(App[None]):
         self.query_one("#agent-tabs", TabbedContent).add_class("single-pane")
         # Start a new session
         self._current_session_id = self.session_manager.start_new_session()
+        self._current_session_has_user_message = False
         self._original_session_name = ""
+        self._reset_branch_state()
+        self._recreate_plan_manager()
+        self.run_worker(self._show_lambda_logo(), exclusive=False)
 
     async def on_unmount(self) -> None:
         """Save session on exit."""
         if self._save_timer:
             self._save_timer.cancel()
             self._save_timer = None
-        if self.history:
+        if self._current_session_has_user_message or self._has_user_message():
             await self._do_auto_save()
 
-    def _scroll_to_bottom(self, scroll_widget: VerticalScroll | None = None) -> None:
-        """Scroll to bottom only if user is already at or near the bottom.
+    def _has_user_message(self) -> bool:
+        return any(
+            isinstance(msg, dict) and msg.get("role") == "user" for msg in self.history
+        )
 
-        This allows the user to stop auto-scroll by scrolling up at any time.
-        Auto-scroll re-enables when the user scrolls back to the bottom.
-        """
+    def _reset_branch_state(self) -> None:
+        self._message_nodes = {}
+        self._active_leaf_id = None
+        self._next_message_seq = 1
+        self._last_saved_history_len = 0
+
+    def _load_branch_state(self, data: dict[str, Any]) -> None:
+        self._message_nodes = data.get("message_nodes", {})
+        self._active_leaf_id = data.get("active_leaf_id")
+        self._next_message_seq = data.get("next_message_seq", 1)
+        self._last_saved_history_len = len(self.history)
+
+    def _sync_branch_state_from_history(self) -> None:
+        history_len = len(self.history)
+        if history_len == self._last_saved_history_len:
+            return
+        if history_len < self._last_saved_history_len:
+            (
+                self._message_nodes,
+                self._active_leaf_id,
+                self._next_message_seq,
+            ) = self.session_manager.history_to_message_tree(self.history)
+        else:
+            parent_id = self._active_leaf_id
+            for message in self.history[self._last_saved_history_len:]:
+                parent_id, self._next_message_seq = self.session_manager.append_message_node(
+                    self._message_nodes,
+                    parent_id,
+                    message,
+                    self._next_message_seq,
+                )
+            self._active_leaf_id = parent_id
+        self._last_saved_history_len = history_len
+
+    def _scroll_to_bottom(
+        self, scroll_widget: VerticalScroll | None = None, *, force: bool = False
+    ) -> None:
+        """Scroll to bottom, unless the user scrolled up and force is false."""
         if scroll_widget is None:
             scroll_widget = self.query_one("#main-chat-log", VerticalScroll)
-        # Only scroll if already at or near bottom — this lets the user
-        # "opt out" of auto-scroll by scrolling up.
-        if not self._is_at_bottom(scroll_widget):
+        if not force and not self._is_at_bottom(scroll_widget):
             return
         scroll_widget.scroll_end(animate=False)
+        if force:
+            self.call_after_refresh(lambda: scroll_widget.scroll_end(animate=False))
         self._auto_scroll = True
 
     def _is_at_bottom(self, scroll_widget: VerticalScroll) -> bool:
@@ -602,9 +618,15 @@ class LambdaCodingTUIApp(App[None]):
         current_y = scroll_widget.scroll_y
         return current_y >= max_y - 5
 
-    def on_vertical_scroll_scroll_up(self, event) -> None:
-        """User scrolled up — disable auto-scroll."""
+    def _request_render_window_expansion(self) -> None:
+        """Request older history before the scroll action consumes the viewport."""
         self._auto_scroll = False
+        if not self._rendering_history_window:
+            self.run_worker(self._expand_render_window_for_scroll_up(), exclusive=False)
+
+    def on_vertical_scroll_scroll_up(self, event) -> None:
+        """Compatibility hook for any bubbled scroll-up messages."""
+        self._request_render_window_expansion()
 
     def on_vertical_scroll_scroll_down(self, event) -> None:
         """User scrolled down — re-enable if at bottom."""
@@ -626,7 +648,7 @@ class LambdaCodingTUIApp(App[None]):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Switch Model", "Select a different LLM model", self._open_model_selector)
         yield SystemCommand("Sessions", "Browse and switch sessions", self._open_session_selector)
-        yield SystemCommand("Rewind", "Rewind to an earlier message", self._open_rewind_selector)
+        yield SystemCommand("Rewind", "Browse this session's branch tree and rewind to a user message", self._open_rewind_selector)
         yield SystemCommand("Refresh Skills", "Reload discovered Agent Skills", self._refresh_skills)
         yield SystemCommand("Clear Chat", "Clear all chat history", self._clear_chat)
 
@@ -657,6 +679,41 @@ class LambdaCodingTUIApp(App[None]):
         right += "  "
         self.query_one("#status-left", Static).update(left)
         self.query_one("#status-right", Static).update(right)
+
+    def _lambda_logo(self) -> Vertical:
+        return Vertical(
+            Static(
+                "\n".join(
+                    [
+                        ' __     __   _  _  ____  ____   __  ',
+                        '(  )   / _\\ ( \\/ )(  _ \\(    \\ / _\\ ',
+                        '/ (_/\\/    \\/ \\/ \\ ) _ ( ) D (/    \\',
+                        '\\____/\\_/\\_/\\_)(_/(____/(____/\\_/\\_/',
+                    ]
+                ),
+                id="lambda-logo-mark",
+            ),
+            Static("LambdaCodingAgent", id="lambda-logo-title"),
+            Static("Send a message or choose a session to begin.", id="lambda-logo-subtitle"),
+            id="lambda-logo",
+        )
+
+    async def _show_lambda_logo(self) -> None:
+        chat_log = self.query_one("#main-chat-log", VerticalScroll)
+        if chat_log.children:
+            return
+        await chat_log.mount(self._lambda_logo())
+        self._logo_visible = True
+
+    async def _hide_lambda_logo(self) -> None:
+        if not self._logo_visible:
+            return
+        try:
+            logo = self.query_one("#lambda-logo", Vertical)
+            await logo.remove()
+        except Exception:
+            pass
+        self._logo_visible = False
 
     def _refresh_git_info(self) -> None:
         """Synchronously query git status for the status bar."""
@@ -702,7 +759,17 @@ class LambdaCodingTUIApp(App[None]):
         self._update_status_bar()
 
     def action_interrupt(self) -> None:
-        """Handle escape key: abort the current agent turn."""
+        """Handle escape key: abort current turn, or open tree on double Esc."""
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_escape_at is not None
+            and now - self._last_escape_at <= timedelta(seconds=0.75)
+            and not self._modal_screen_active()
+        ):
+            self._last_escape_at = None
+            self.run_worker(self._open_session_tree(), exclusive=False)
+            return
+        self._last_escape_at = now
         if self._busy and self._active_abort_signal:
             self._active_abort_signal.abort("user interrupted")
 
@@ -713,12 +780,32 @@ class LambdaCodingTUIApp(App[None]):
         input_widget.focus()
 
     def action_toggle_tool_expand(self) -> None:
-        """Toggle expand/collapse on ALL ToolBlock widgets, preserving scroll position."""
+        """Toggle expand/collapse on ALL ToolBlock widgets, preserving visual position.
+
+        Strategy: track the widget at the top of the viewport by its unique
+        identity (Python id). After expand/collapse, find that same widget
+        and scroll so its top edge is at the same screen row.
+        """
         from lambda_coding_agent.tui.tool_cards import ToolBlock
 
-        # Save scroll position before changing content height
         chat_log = self.query_one("#main-chat-log", VerticalScroll)
-        saved_scroll_y = chat_log.scroll_y
+        scroll_y = chat_log.scroll_y
+
+        # Record the widget ID of the first visible direct child of the scroll
+        # container (bubbles, tool blocks, hints, etc.)
+        anchor_widget_id = None
+        try:
+            for child in chat_log.children:
+                try:
+                    region = child.region
+                    # The first child whose top is at or below the scroll offset
+                    if region.y >= scroll_y - 1:
+                        anchor_widget_id = id(child)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
         self._tools_expanded = not getattr(self, "_tools_expanded", False)
         try:
@@ -736,8 +823,24 @@ class LambdaCodingTUIApp(App[None]):
         except Exception:
             pass
 
-        # Restore scroll position after content height changes
-        chat_log.scroll_to(y=saved_scroll_y, animate=False)
+        # Restore visual position by finding the anchor widget and scrolling to it
+        if anchor_widget_id is not None:
+            try:
+                for child in chat_log.children:
+                    if id(child) == anchor_widget_id:
+                        try:
+                            new_region = child.region
+                            chat_log.scroll_to(y=new_region.y, animate=False)
+                        except Exception:
+                            pass
+                        break
+            except Exception:
+                pass
+        else:
+            # Fallback: preserve absolute scroll_y
+            chat_log.scroll_to(y=scroll_y, animate=False)
+
+        self._scroll_to_bottom(chat_log, force=True)
 
     # ── Working indicator & tab labels ─────────────────────────
 
@@ -928,7 +1031,12 @@ class LambdaCodingTUIApp(App[None]):
 
         # Keep working indicator at the very bottom of main chat log
         if not _is_fork_model_call_id(model_call_id):
+            index = len(self.history)
+            self.history.append({"role": "assistant", "content": ""})
+            self._live_model_history_indices[model_call_id] = index
+            self._render_window_end = len(self.history)
             await self._reposition_working_indicator()
+            self._trim_rendered_history_after_live_append()
 
     async def append_model_content(
         self, model_call_id: str, content_delta: str
@@ -949,6 +1057,7 @@ class LambdaCodingTUIApp(App[None]):
 
         state.content += content_delta
         state.content_dirty = True
+        self._update_live_model_history(model_call_id)
         if content_delta:
             self._schedule_model_flush(model_call_id)
 
@@ -960,6 +1069,7 @@ class LambdaCodingTUIApp(App[None]):
             return
         state.reasoning += reasoning_delta
         state.reasoning_dirty = True
+        self._update_live_model_history(model_call_id)
         self._schedule_model_flush(model_call_id)
 
     async def finish_model_response(
@@ -969,6 +1079,7 @@ class LambdaCodingTUIApp(App[None]):
         if state is None:
             return
         state.finished = True
+        self._update_live_model_history(model_call_id)
         self._schedule_model_flush(model_call_id)
 
         # Show usage footer in the bubble (skip for forks)
@@ -1016,6 +1127,19 @@ class LambdaCodingTUIApp(App[None]):
             # After a tool call, next content should go into a new widget
             model_state._needs_new_content_widget = True
 
+        if not _is_fork_tool_call_id(tool_call_id):
+            index = len(self.history)
+            self.history.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": "",
+            })
+            self._live_tool_history_indices[tool_call_id] = index
+            self._render_window_end = len(self.history)
+            self._update_live_model_history(model_call_id)
+            self._trim_rendered_history_after_live_append()
+
     async def append_tool_output(
         self, tool_call_id: str, output_delta: str
     ) -> None:
@@ -1024,6 +1148,7 @@ class LambdaCodingTUIApp(App[None]):
             return
         state.output += output_delta
         state.output_dirty = True
+        self._update_live_tool_history(tool_call_id)
         self._schedule_tool_flush(tool_call_id)
 
     async def append_tool_argument(
@@ -1074,6 +1199,7 @@ class LambdaCodingTUIApp(App[None]):
         state.stats_line = stats_line
         state.success = success
         state.status = "success" if success else "error"
+        self._update_live_tool_history(tool_call_id)
         state.result_dirty = True
         state.status_dirty = True
         self._schedule_tool_flush(tool_call_id)
@@ -1089,6 +1215,47 @@ class LambdaCodingTUIApp(App[None]):
             self._schedule_git_refresh()
 
     # ── Rendering helpers ─────────────────────────────────────
+
+    def _update_live_model_history(self, model_call_id: str) -> None:
+        index = self._live_model_history_indices.get(model_call_id)
+        state = self._models.get(model_call_id)
+        if index is None or state is None or index >= len(self.history):
+            return
+        message = self.history[index]
+        if message.get("role") != "assistant":
+            return
+        message["content"] = state.content
+        if state.reasoning:
+            message["reasoning"] = state.reasoning
+
+    def _update_live_tool_history(self, tool_call_id: str) -> None:
+        index = self._live_tool_history_indices.get(tool_call_id)
+        state = self._tools.get(tool_call_id)
+        if index is None or state is None or index >= len(self.history):
+            return
+        message = self.history[index]
+        if message.get("role") != "tool":
+            return
+        message["content"] = state.result or state.output
+        message["name"] = state.name
+        message["tool_call_id"] = tool_call_id
+
+    def _trim_rendered_history_after_live_append(self) -> None:
+        """Keep live streaming widgets visible while enforcing the 20-message cap."""
+        try:
+            chat_log = self.query_one("#main-chat-log", VerticalScroll)
+        except Exception:
+            return
+        overflow = len(chat_log.children) - self._max_render_message_count
+        if overflow <= 0:
+            return
+        removable = list(chat_log.children)[:overflow]
+        self._render_window_start = min(
+            len(self.history),
+            self._render_window_start + len(removable),
+        )
+        for widget in removable:
+            self.call_later(widget.remove)
 
     def _schedule_model_flush(self, model_call_id: str) -> None:
         if model_call_id in self._flushing_models:
@@ -1243,7 +1410,7 @@ class LambdaCodingTUIApp(App[None]):
         input_widget = self._chat_input()
         end = start + len(query)
         self._suppress_path_autocomplete = True
-        input_widget.replace(path, start, end)
+        input_widget.insert_path_completion(start, end, path)
         self._hide_path_autocomplete()
         input_widget.focus()
 
@@ -1256,14 +1423,14 @@ class LambdaCodingTUIApp(App[None]):
             self._insert_path_completion(str(option.prompt))
             return
 
-        text = event.value.strip()
-        if not text:
+        text = event.value
+        if not text.strip():
             return
 
         input_widget = self._chat_input()
         input_widget.value = ""
 
-        lowered = text.lower()
+        lowered = text.strip().lower()
 
         # "/" opens command palette
         if lowered == "/":
@@ -1289,12 +1456,17 @@ class LambdaCodingTUIApp(App[None]):
         self.run_worker(self._run_turn(text), thread=False)
 
     async def _append_user_message(self, text: str) -> None:
+        self._current_session_has_user_message = True
+        self.history.append({"role": "user", "content": text})
+        self._live_turn_user_index = len(self.history) - 1
+        self._render_window_end = len(self.history)
         # Reset turn bubble so next assistant response starts fresh
         self._current_turn_bubble = None
         # Re-enable auto-scroll on user message
         self._auto_scroll = True
 
         chat_log = self.query_one("#main-chat-log", VerticalScroll)
+        await self._hide_lambda_logo()
 
         bubble = Vertical(classes="bubble user-bubble")
         await chat_log.mount(bubble)
@@ -1304,13 +1476,14 @@ class LambdaCodingTUIApp(App[None]):
         body = Static(text, classes="body")
         await bubble.mount(role, body)
 
-        self._scroll_to_bottom(chat_log)
+        self._scroll_to_bottom(chat_log, force=True)
 
         # Refresh git status — previous agent turn may have modified files
         self._schedule_git_refresh()
 
         # Clean up finished fork panes from previous turn
         await self._cleanup_finished_forks()
+        self._trim_rendered_history_after_live_append()
 
     async def _append_system_hint(self, text: str) -> None:
         hint = Static(text, classes="system-hint")
@@ -1395,7 +1568,9 @@ class LambdaCodingTUIApp(App[None]):
     async def _clear_chat(self) -> None:
         chat_log = self.query_one("#main-chat-log", VerticalScroll)
         await chat_log.remove_children()
+        self._logo_visible = False
         self.history = []
+        self._reset_branch_state()
         self._models.clear()
         self._tools.clear()
         self._current_turn_bubble = None
@@ -1492,25 +1667,37 @@ class LambdaCodingTUIApp(App[None]):
         self.push_screen(screen, on_select)
 
     async def _open_rewind_selector(self) -> None:
-        """Open the rewind selection modal."""
-        from lambda_coding_agent.tui.screens.rewind_select import RewindSelectModalScreen
+        """Open the same branch-aware session tree used by double Esc."""
+        await self._open_session_tree()
 
-        if not self.history:
-            await self._append_system_hint("No messages to rewind.")
-            return
+    async def _open_session_tree(self) -> None:
+        """Open the branch-aware session tree, triggered by double Esc."""
+        from lambda_coding_agent.tui.screens.session_tree import SessionTreeScreen
 
-        # Only allow rewinding when not busy
         if self._busy:
-            await self._append_system_hint("Wait for the current turn to finish before rewinding.")
+            await self._append_system_hint("Wait for the current turn to finish before opening the session tree.")
+            return
+        self._sync_branch_state_from_history()
+        if not self._message_nodes:
+            await self._append_system_hint("No messages in the session tree yet.")
             return
 
-        screen = RewindSelectModalScreen(history=self.history)
+        screen = SessionTreeScreen(
+            message_nodes=self._message_nodes,
+            active_leaf_id=self._active_leaf_id,
+            session_name=self._original_session_name,
+            on_switch=self._switch_branch,
+            on_rewind=self._rewind_to_node,
+        )
 
         def on_select(result: Any) -> None:
             if result is None:
                 return
-            history_index, user_message_text = result
-            self.run_worker(self._rewind_and_fork(history_index, user_message_text), exclusive=False)
+            action, node_id = result
+            if action == "switch":
+                self.run_worker(self._switch_branch(node_id), exclusive=False)
+            elif action == "rewind":
+                self.run_worker(self._rewind_to_node(node_id), exclusive=False)
 
         self.push_screen(screen, on_select)
 
@@ -1520,10 +1707,13 @@ class LambdaCodingTUIApp(App[None]):
         """Save current session, create a new one, clear chat."""
         await self._do_auto_save()
         self._current_session_id = self.session_manager.start_new_session()
+        self._current_session_has_user_message = False
         self._original_session_name = ""
         self._name_generated = False
+        self._reset_branch_state()
         self._recreate_plan_manager()
         await self._clear_chat()
+        await self._show_lambda_logo()
 
     async def _load_session(self, session_id: str) -> None:
         """Auto-save current, then load a session from disk."""
@@ -1538,6 +1728,8 @@ class LambdaCodingTUIApp(App[None]):
         self._current_session_id = session_id
         self._recreate_plan_manager()
         self.history = data.get("history", [])
+        self._load_branch_state(data)
+        self._current_session_has_user_message = self._has_user_message()
         self.model_name = data.get("model_name", self.model_name)
         self._last_prompt_tokens = data.get("last_ctx_usage", 0)
         self._name_generated = True  # Name is already set
@@ -1563,63 +1755,89 @@ class LambdaCodingTUIApp(App[None]):
                 pass
 
         await self._rebuild_chat_from_history()
+        await self._hide_lambda_logo()
+        self._scroll_to_bottom(force=True)
         self._update_status_bar()
 
     async def _rewind_and_fork(self, history_index: int, user_message_text: str) -> None:
-        """Create a fork session truncated to before the selected user message.
-
-        The fork inherits the parent's active plan by copying the session-scoped
-        plan index file.
-        """
-        # Save current session first
+        """Create a branch in the current session before the selected user message."""
         await self._do_auto_save()
 
-        # Find the last message before the selected user message to keep
+        active_path = self.session_manager.active_path_ids(
+            self._message_nodes,
+            self._active_leaf_id,
+        )
+        node_id = active_path[history_index] if history_index < len(active_path) else None
+        if node_id:
+            await self._rewind_to_node(node_id, user_message_text=user_message_text)
+            return
+
         truncate_after = self._find_preceding_turn_end(history_index)
-        fork_history = list(self.history[:truncate_after + 1]) if truncate_after >= 0 else []
+        branch_history = list(self.history[:truncate_after + 1]) if truncate_after >= 0 else []
+        self._active_leaf_id = active_path[truncate_after] if truncate_after >= 0 else None
+        self._last_saved_history_len = len(branch_history)
+        self.history = branch_history
+        self._current_session_has_user_message = self._has_user_message()
 
-        # Build fork name
-        original_name = self._original_session_name or self.session_manager.get_session_name(
-            self._current_session_id
+        await self._finish_rewind(user_message_text)
+
+    async def _rewind_to_node(
+        self,
+        node_id: str,
+        user_message_text: str | None = None,
+    ) -> None:
+        """Rewind before a selected user node, leaving the old path as a sibling branch."""
+        await self._do_auto_save()
+        node = self._message_nodes.get(node_id)
+        if not isinstance(node, dict):
+            return
+        message = node.get("message", {})
+        if message.get("role") != "user":
+            await self._switch_branch(node_id)
+            return
+
+        user_message_text = user_message_text if user_message_text is not None else str(message.get("content", ""))
+        self._active_leaf_id = self.session_manager.parent_id_for_node(
+            self._message_nodes,
+            node_id,
         )
-        preview = user_message_text[:40].replace("\n", " ")
-        fork_name = f"Fork from {original_name} at {preview}"
-
-        fork_id = self.session_manager.start_new_session()
-        self.session_manager.save_session(
-            fork_id,
-            history=fork_history,
-            model_name=self.model_name,
-            name=fork_name,
-            provider_id=self.provider_id or "",
-            last_ctx_usage=0,
+        self.history = self.session_manager.project_active_history(
+            self._message_nodes,
+            self._active_leaf_id,
         )
+        self._last_saved_history_len = len(self.history)
+        self._current_session_has_user_message = self._has_user_message()
 
-        # Inherit plan: copy parent's session-scoped plan index to the fork
-        parent_index_path = self.plan_manager.index_path
-        if os.path.exists(parent_index_path):
-            fork_index_path = os.path.join(
-                self.plan_manager.plans_dir, "sessions", f"{fork_id}.json"
-            )
-            os.makedirs(os.path.dirname(fork_index_path), exist_ok=True)
-            shutil.copy2(parent_index_path, fork_index_path)
+        await self._finish_rewind(user_message_text)
 
-        # Load the fork as current
-        self._current_session_id = fork_id
-        self.history = fork_history
-        self._original_session_name = fork_name
-        self._name_generated = True
-        self._recreate_plan_manager()
-
+    async def _finish_rewind(self, user_message_text: str) -> None:
         await self._rebuild_chat_from_history()
         self._update_status_bar()
 
-        # Place the selected message in the input box
         input_widget = self._chat_input()
         input_widget.value = user_message_text
         input_widget.focus()
 
-        self.notify(f"Forked: {fork_name[:60]}")
+        preview = user_message_text[:40].replace("\n", " ")
+        self.notify(f"Branched at: {preview}")
+        self._schedule_auto_save()
+
+    async def _switch_branch(self, leaf_id: str) -> None:
+        """Switch the active branch projection to the selected node."""
+        await self._do_auto_save()
+        if leaf_id not in self._message_nodes:
+            return
+        self._active_leaf_id = leaf_id
+        self.history = self.session_manager.project_active_history(
+            self._message_nodes,
+            self._active_leaf_id,
+        )
+        self._last_saved_history_len = len(self.history)
+        self._current_session_has_user_message = self._has_user_message()
+        await self._rebuild_chat_from_history()
+        self._scroll_to_bottom(force=True)
+        self._update_status_bar()
+        self._schedule_auto_save()
 
     def _find_preceding_turn_end(self, user_msg_index: int) -> int:
         """Find the index of the last message before user_msg_index
@@ -1634,40 +1852,90 @@ class LambdaCodingTUIApp(App[None]):
         return -1  # No preceding assistant (first user message)
 
     async def _rebuild_chat_from_history(self) -> None:
-        """Reconstruct the visual chat UI from saved history."""
-        chat_log = self.query_one("#main-chat-log", VerticalScroll)
-        await chat_log.remove_children()
-        self._models.clear()
-        self._tools.clear()
-        self._current_turn_bubble = None
-        self._current_model_call_id = None
-        self._flushing_models.clear()
-        self._flushing_tools.clear()
+        """Reconstruct the visual chat UI from the recent history window."""
+        end = len(self.history)
+        start = max(0, end - self._initial_render_message_count)
+        await self._render_history_window(start, end, scroll_to_bottom=True)
 
-        i = 0
-        while i < len(self.history):
-            msg = self.history[i]
-            role = msg.get("role", "")
-            if role == "user":
-                await self._replay_user_bubble(chat_log, msg.get("content", ""))
-                i += 1
-            elif role == "assistant":
-                # Collect this turn's messages (assistant + interleaved tools)
-                turn_msgs, i = self._collect_turn_messages(i)
-                await self._replay_assistant_turn(chat_log, turn_msgs)
-            else:
-                # Skip standalone tool/system messages
-                i += 1
+    async def _expand_render_window_for_scroll_up(self) -> None:
+        """Render older messages when the user scrolls up, capped at 20 messages."""
+        if self._render_window_start <= 0:
+            return
+        end = self._render_window_end or len(self.history)
+        current_size = end - self._render_window_start
+        if current_size >= self._max_render_message_count:
+            return
+        target_size = self._max_render_message_count
+        start = max(0, end - target_size)
+        await self._render_history_window(start, end, preserve_scroll=True)
 
-    def _collect_turn_messages(self, start_idx: int) -> tuple[list[dict], int]:
+    async def _render_history_window(
+        self,
+        start: int,
+        end: int,
+        *,
+        scroll_to_bottom: bool = False,
+        preserve_scroll: bool = False,
+    ) -> None:
+        """Render a sliding message window, not the entire persisted history."""
+        self._rendering_history_window = True
+        try:
+            chat_log = self.query_one("#main-chat-log", VerticalScroll)
+            previous_scroll_y = chat_log.scroll_y
+            start = max(0, min(start, len(self.history)))
+            end = max(start, min(end, len(self.history)))
+            if end - start > self._max_render_message_count:
+                start = end - self._max_render_message_count
+
+            await chat_log.remove_children()
+            self._logo_visible = False
+            self._models.clear()
+            self._tools.clear()
+            self._current_turn_bubble = None
+            self._current_model_call_id = None
+            self._flushing_models.clear()
+            self._flushing_tools.clear()
+            self._render_window_start = start
+            self._render_window_end = end
+
+            i = start
+            while i < end:
+                msg = self.history[i]
+                role = msg.get("role", "")
+                if role == "user":
+                    await self._replay_user_bubble(chat_log, msg.get("content", ""))
+                    i += 1
+                elif role == "assistant":
+                    # Collect this turn's messages (assistant + interleaved tools)
+                    turn_msgs, next_i = self._collect_turn_messages(i, end=end)
+                    await self._replay_assistant_turn(chat_log, turn_msgs)
+                    i = next_i
+                else:
+                    # Skip standalone tool/system messages
+                    i += 1
+
+            if scroll_to_bottom:
+                self._scroll_to_bottom(chat_log, force=True)
+            elif preserve_scroll:
+                chat_log.scroll_to(y=previous_scroll_y, animate=False)
+        finally:
+            self._rendering_history_window = False
+
+    def _collect_turn_messages(
+        self,
+        start_idx: int,
+        *,
+        end: int | None = None,
+    ) -> tuple[list[dict], int]:
         """Collect all messages belonging to one assistant turn.
 
         An assistant turn starts with role='assistant' and continues
         through any interleaved tool responses until the next user message.
         """
+        limit = len(self.history) if end is None else min(end, len(self.history))
         turn_msgs = [self.history[start_idx]]
         i = start_idx + 1
-        while i < len(self.history):
+        while i < limit:
             role = self.history[i].get("role", "")
             if role == "user":
                 break
@@ -1759,12 +2027,15 @@ class LambdaCodingTUIApp(App[None]):
 
         if not self._current_session_id:
             return
+        if not (self._current_session_has_user_message or self._has_user_message()):
+            return
 
         name = self._original_session_name
         active_plan_id = self.plan_manager.get_active_plan_id()
         active_plan_path = None
         if active_plan_id:
             active_plan_path = f".lambda/plans/{active_plan_id}.json"
+        self._sync_branch_state_from_history()
         self.session_manager.save_session(
             self._current_session_id,
             history=list(self.history),
@@ -1774,7 +2045,11 @@ class LambdaCodingTUIApp(App[None]):
             last_ctx_usage=self._last_prompt_tokens,
             active_plan_id=active_plan_id,
             active_plan_path=active_plan_path,
+            message_nodes=self._message_nodes,
+            active_leaf_id=self._active_leaf_id,
+            next_message_seq=self._next_message_seq,
         )
+        self._last_saved_history_len = len(self.history)
 
     def _schedule_auto_save(self) -> None:
         """Debounce auto-save: save after 30s of inactivity."""
@@ -1887,6 +2162,11 @@ class LambdaCodingTUIApp(App[None]):
             )
             if new_history:
                 self.history = new_history
+            self._live_turn_user_index = None
+            self._live_model_history_indices.clear()
+            self._live_tool_history_indices.clear()
+            self._render_window_end = len(self.history)
+            self._sync_branch_state_from_history()
         except Exception as exc:
             await self._append_system_hint(f"Agent error: {exc}")
         finally:

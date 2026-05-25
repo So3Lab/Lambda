@@ -58,8 +58,71 @@ class TestSaveLoad:
         assert data["provider_id"] == "test"
         assert data["last_ctx_usage"] == 5000
         assert data["history"] == history
+        assert data["schema_version"] == 2
+        assert len(data["message_nodes"]) == 2
+        assert data["active_leaf_id"] in data["message_nodes"]
         assert data["created_at"]
         assert data["last_active_at"]
+
+    def test_loads_legacy_flat_history_as_single_branch(self, mgr):
+        sid = mgr.start_new_session()
+        legacy = {
+            "id": sid,
+            "name": "Legacy",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "last_active_at": "2024-01-01T00:00:00+00:00",
+            "model_name": "m",
+            "history": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ],
+        }
+        with open(mgr._session_path(sid), "w", encoding="utf-8") as f:
+            json.dump(legacy, f)
+
+        data = mgr.load_session(sid)
+
+        assert data["schema_version"] == 2
+        assert data["history"] == legacy["history"]
+        assert len(data["message_nodes"]) == 2
+        assert mgr.project_active_history(
+            data["message_nodes"],
+            data["active_leaf_id"],
+        ) == legacy["history"]
+
+    def test_saves_and_loads_branch_aware_session(self, mgr):
+        sid = mgr.start_new_session()
+        trunk = [{"role": "user", "content": "first"}]
+        nodes, active_leaf_id, next_seq = mgr.history_to_message_tree(trunk)
+        branch_leaf, next_seq = mgr.append_message_node(
+            nodes,
+            active_leaf_id,
+            {"role": "assistant", "content": "branch"},
+            next_seq,
+        )
+        mgr.append_message_node(
+            nodes,
+            active_leaf_id,
+            {"role": "assistant", "content": "other branch"},
+            next_seq,
+        )
+
+        mgr.save_session(
+            sid,
+            history=[],
+            model_name="m",
+            message_nodes=nodes,
+            active_leaf_id=branch_leaf,
+            next_message_seq=next_seq + 1,
+        )
+        data = mgr.load_session(sid)
+
+        assert len(data["message_nodes"]) == 3
+        assert data["active_leaf_id"] == branch_leaf
+        assert data["history"] == [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "branch"},
+        ]
 
     def test_save_is_atomic_via_tmp_file(self, mgr):
         sid = mgr.start_new_session()
