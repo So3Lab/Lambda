@@ -131,7 +131,7 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
     # ── Shell ──────────────────────────────────────────────────────
 
     @pack.primitive("run_command")
-    def ws_run_command(
+    async def ws_run_command(
         ctx: PrimitiveCallContext,
         command: str,
         cwd: str = "",
@@ -163,63 +163,40 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
           All tests passed
           --- stderr ---
         """
-        import subprocess
+        from lambda_coding_agent.tools.shell import run_command
 
         backend: WorkspaceBackend = ctx.backend
+        relative_cwd: str | None = None
         if cwd:
             work_dir = backend.workspace / cwd
             try:
-                work_dir.resolve().relative_to(backend.workspace)
+                resolved_work_dir = work_dir.resolve()
+                relative_cwd = str(resolved_work_dir.relative_to(backend.workspace))
             except ValueError:
                 return f"Directory not found: {cwd}"
-            work_dir_str = str(work_dir)
+            work_dir_str = str(resolved_work_dir)
         else:
             work_dir_str = str(backend.workspace)
 
         if not os.path.isdir(work_dir_str):
             return f"Directory not found: {work_dir_str}"
 
-        start = time.time()
-        timed_out = False
-        MAX_OUTPUT_CHARS = 80000
-
-        try:
-            proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=work_dir_str,
-                capture_output=True,
-                timeout=timeout,
-                env=os.environ.copy(),
-            )
-            stdout = proc.stdout.decode("utf-8", errors="replace")
-            stderr = proc.stderr.decode("utf-8", errors="replace")
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            stdout = ""
-            stderr = "Command timed out"
-            exit_code = -1
-            duration_ms = int((time.time() - start) * 1000)
-        except Exception as e:
-            return f"Error: {e}"
-
-        if not timed_out:
-            duration_ms = int((time.time() - start) * 1000)
-
-        truncated = len(stdout) > MAX_OUTPUT_CHARS
-        if truncated:
-            stdout = stdout[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
+        result = await run_command(
+            command,
+            workspace=str(backend.workspace),
+            cwd=relative_cwd,
+            timeout=timeout,
+        )
 
         lines = [
-            f"exit_code: {exit_code}",
-            f"timed_out: {timed_out}",
-            f"duration_ms: {duration_ms}",
-            f"truncated: {truncated}",
+            f"exit_code: {result['exit_code']}",
+            f"timed_out: {result['timed_out']}",
+            f"duration_ms: {result['duration_ms']}",
+            f"truncated: {result['truncated']}",
             "--- stdout ---",
-            stdout,
+            result["stdout"],
             "--- stderr ---",
-            stderr,
+            result["stderr"],
         ]
         return "\n".join(lines)
 
