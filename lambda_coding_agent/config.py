@@ -25,7 +25,7 @@ def load_config(
     Search order for provider.json:
     1. Explicit provider_path argument
     2. workspace/provider.json
-    3. ~/.lambda-agent/provider.json
+    3. ~/.lambda/provider.json
 
     Args:
         workspace: Workspace directory path.
@@ -44,7 +44,7 @@ def load_config(
     else:
         candidates = [
             os.path.join(workspace, "provider.json"),
-            os.path.expanduser("~/.lambda-agent/provider.json"),
+            os.path.expanduser("~/.lambda/provider.json"),
         ]
         for candidate in candidates:
             if os.path.exists(candidate):

@@ -1,5 +1,6 @@
 """Tests for CLI module."""
 
+import io
 import os
 import sys
 from unittest.mock import patch
@@ -42,3 +43,54 @@ class TestCLI:
                         main()
                     except SystemExit:
                         pass
+
+    def test_main_rejects_one_shot_and_headless_together(self, tmp_path):
+        with patch("sys.argv", [
+            "lambda-agent",
+            "--workspace",
+            str(tmp_path),
+            "--one-shot",
+            "hello",
+            "--headless",
+            "hello",
+        ]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+            assert exc.value.code == 2
+
+    def test_main_headless_creates_session_before_agent(self, tmp_path):
+        with patch("sys.argv", [
+            "lambda-agent",
+            "--workspace",
+            str(tmp_path),
+            "--headless",
+            "hello",
+            "--events",
+            "-",
+        ]):
+            with patch("lambda_coding_agent.cli.create_agent") as create_agent:
+                create_agent.return_value = object()
+                with patch("lambda_coding_agent.headless.run_headless_turn_sync") as run_headless:
+                    main()
+
+        kwargs = create_agent.call_args.kwargs
+        assert kwargs["session_id"]
+        run_kwargs = run_headless.call_args.kwargs
+        assert run_kwargs["session"].session_id == kwargs["session_id"]
+        assert run_kwargs["prompt"] == "hello"
+
+    def test_main_headless_reads_prompt_from_stdin(self, tmp_path):
+        with patch("sys.argv", [
+            "lambda-agent",
+            "--workspace",
+            str(tmp_path),
+            "--headless",
+            "-",
+        ]):
+            with patch("sys.stdin", io.StringIO("from stdin")):
+                with patch("lambda_coding_agent.cli.create_agent") as create_agent:
+                    create_agent.return_value = object()
+                    with patch("lambda_coding_agent.headless.run_headless_turn_sync") as run_headless:
+                        main()
+
+        assert run_headless.call_args.kwargs["prompt"] == "from stdin"

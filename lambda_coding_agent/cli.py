@@ -2,10 +2,50 @@
 
 import argparse
 import io
+import json
 import os
 import subprocess
 import sys
 from datetime import datetime
+
+# Initialize ~/.lambda config directory on first run
+_LAMBDA_CONFIG_DIR = os.path.expanduser("~/.lambda")
+
+def _init_config_dir() -> None:
+    """Create ~/.lambda with defaults if it doesn't exist."""
+    if os.path.exists(_LAMBDA_CONFIG_DIR):
+        return
+
+    os.makedirs(_LAMBDA_CONFIG_DIR, exist_ok=True)
+
+    # Default provider.json (empty template)
+    provider_path = os.path.join(_LAMBDA_CONFIG_DIR, "provider.json")
+    if not os.path.exists(provider_path):
+        with open(provider_path, "w") as f:
+            f.write('{}\n')
+
+    # Default .env
+    env_path = os.path.join(_LAMBDA_CONFIG_DIR, ".env")
+    if not os.path.exists(env_path):
+        with open(env_path, "w") as f:
+            f.write("LOG_LEVEL=WARNING\n")
+            f.write("LOG_DIR=~/.lambda/logs\n")
+            f.write('LANGFUSE_SECRET_KEY=""\n')
+            f.write('LANGFUSE_PUBLIC_KEY=""\n')
+            f.write('LANGFUSE_BASE_URL=""\n')
+            f.write("LANGFUSE_ENABLED=false\n")
+            f.write("LANGFUSE_EXPORT_ALL_SPANS=true\n")
+
+    # Logs directory
+    os.makedirs(os.path.join(_LAMBDA_CONFIG_DIR, "logs"), exist_ok=True)
+
+_init_config_dir()
+
+# Load ~/.lambda/.env
+_LAMBDA_ENV_FILE = os.path.join(_LAMBDA_CONFIG_DIR, ".env")
+if os.path.exists(_LAMBDA_ENV_FILE):
+    from dotenv import load_dotenv
+    load_dotenv(_LAMBDA_ENV_FILE)
 
 from lambda_coding_agent.agent import create_agent
 from lambda_coding_agent.app import launch_tui
@@ -113,6 +153,37 @@ def _detect_git_info(workspace: str) -> str:
         return ""
 
 
+def _resolve_display_model_and_context_window(config) -> tuple[str, int]:
+    """Determine model label and context window for status/session metadata."""
+    display_model = config.model_name or "unknown"
+    context_window = 200_000
+    if config.provider_path:
+        try:
+            with open(config.provider_path) as f:
+                data = json.load(f)
+            first_provider = next(iter(data.values()))
+            if display_model == "unknown":
+                first_model = first_provider[0] if isinstance(first_provider, list) else next(iter(first_provider.values()))
+                display_model = first_model.get("model_name", "unknown")
+                context_window = first_model.get("context_window", 200_000)
+            else:
+                models_list = first_provider if isinstance(first_provider, list) else list(first_provider.values())
+                for m in models_list:
+                    if m.get("model_name") == display_model:
+                        context_window = m.get("context_window", 200_000)
+                        break
+        except Exception:
+            pass
+    return display_model, context_window
+
+
+def _read_prompt_argument(prompt: str) -> str:
+    """Read prompt from stdin when PROMPT is '-'."""
+    if prompt == "-":
+        return sys.stdin.read()
+    return prompt
+
+
 class _OneShotAdapter:
     """Minimal TUIStreamAdapter that prints to stdout for one-shot mode."""
 
@@ -217,7 +288,25 @@ def main() -> None:
         default=None,
         metavar="PROMPT",
     )
+    parser.add_argument(
+        "--headless",
+        help="Machine-readable single-turn mode. Use '-' to read prompt from stdin.",
+        default=None,
+        metavar="PROMPT",
+    )
+    parser.add_argument(
+        "--session-id",
+        help="Session id to continue in headless mode (default: create a new session)",
+        default=None,
+    )
+    parser.add_argument(
+        "--events",
+        help="Headless NDJSON event output target: '-' for stdout or a file path (default: '-')",
+        default="-",
+    )
     args = parser.parse_args()
+    if args.one_shot is not None and args.headless is not None:
+        parser.error("--one-shot and --headless are mutually exclusive")
 
     workspace = _resolve_workspace(args.workspace)
     if not os.path.isdir(workspace):
@@ -233,6 +322,34 @@ def main() -> None:
 
     # Build environment context
     env_block = build_environment_block(workspace)
+    display_model, context_window = _resolve_display_model_and_context_window(config)
+
+    if args.headless is not None:
+        from lambda_coding_agent.headless import (
+            prepare_headless_session,
+            run_headless_turn_sync,
+        )
+
+        prompt = _read_prompt_argument(args.headless)
+        session = prepare_headless_session(workspace, args.session_id)
+        agent = create_agent(
+            provider_path=config.provider_path,
+            workspace=config.workspace,
+            environment_block=env_block,
+            model_name=config.model_name,
+            provider_id=config.provider_id,
+            session_id=session.session_id,
+        )
+        run_headless_turn_sync(
+            agent=agent,
+            prompt=prompt,
+            workspace=workspace,
+            session=session,
+            model_name=display_model,
+            provider_id=config.provider_id,
+            events=args.events,
+        )
+        return
 
     # Create agent
     agent = create_agent(
@@ -244,34 +361,11 @@ def main() -> None:
     )
 
     if args.one_shot:
-        _run_one_shot(agent, args.one_shot)
+        _run_one_shot(agent, _read_prompt_argument(args.one_shot))
         return
 
     # Detect git info for status bar
     git_info = _detect_git_info(workspace)
-
-    # Determine model name for display
-    display_model = config.model_name or "unknown"
-    context_window = 200_000
-    if config.provider_path:
-        try:
-            import json
-            with open(config.provider_path) as f:
-                data = json.load(f)
-            first_provider = next(iter(data.values()))
-            if display_model == "unknown":
-                first_model = first_provider[0] if isinstance(first_provider, list) else next(iter(first_provider.values()))
-                display_model = first_model.get("model_name", "unknown")
-                context_window = first_model.get("context_window", 200_000)
-            else:
-                # Find the matching model entry for context_window
-                models_list = first_provider if isinstance(first_provider, list) else list(first_provider.values())
-                for m in models_list:
-                    if m.get("model_name") == display_model:
-                        context_window = m.get("context_window", 200_000)
-                        break
-        except Exception:
-            pass
 
     # Tee all stdout/stderr to a log file before TUI takes over the terminal
     log_path = _setup_logging()
@@ -284,7 +378,7 @@ def main() -> None:
         print(f"Workspace: {workspace}")
         print()
         print("WARNING: No LLM configured.")
-        print("Create a provider.json in your workspace or ~/.lambda-agent/")
+        print("Create a provider.json in your workspace or ~/.lambda/")
         print()
         print("Example provider.json:")
         print('  {"openrouter": [{"model_name": "gpt-4", "api_keys": ["sk-..."], "base_url": "https://openrouter.ai/api/v1"}]}')
