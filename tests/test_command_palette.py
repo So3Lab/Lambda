@@ -25,7 +25,11 @@ class TestCommandPalette:
             async with app.run_test() as pilot:
                 # Our custom commands only
                 our_commands = [
-                    "Switch Model", "Sessions", "Rewind", "Refresh Skills", "Clear Chat"
+                    "Switch Model",
+                    "Sessions",
+                    "Rewind",
+                    "Refresh Skills",
+                    "Clear Chat",
                 ]
                 commands = list(app.get_system_commands(app.screen))
                 names = [cmd.title for cmd in commands]
@@ -43,6 +47,7 @@ class TestCommandPalette:
                 our_names = [c.title for c in our_cmds]
                 assert "Exit" not in our_names, "Exit duplicates builtin Quit"
                 assert "Undo" not in our_names, "Undo removed (Rewind covers similar ground)"
+                assert "Session Tree" not in our_names, "Use Rewind/double Esc for branch tree"
 
         import asyncio
         asyncio.run(check())
@@ -87,3 +92,35 @@ class TestCommandPalette:
 
         import asyncio
         asyncio.run(check())
+
+
+
+def test_tui_css_uses_textual_theme_variables():
+    css = LambdaCodingTUIApp.CSS
+
+    assert "background: $background" in css
+    assert "#0f1115" not in css
+    assert "#1a1d24" not in css
+    assert "#6f87a8" not in css
+
+
+def test_tui_applies_theme_palette_to_rich_ansi_colors():
+    app = LambdaCodingTUIApp(
+        agent_func=_stub_agent,
+        workspace="/tmp",
+        model_name="test",
+    )
+
+    async def check():
+        async with app.run_test():
+            app.theme = "dracula"
+            await app._animator.wait_until_complete()
+            app_theme = app.ansi_theme
+            expected = terminal_theme_from_textual_theme(app.current_theme)
+            assert app_theme.background_color == expected.background_color
+            assert app_theme.foreground_color == expected.foreground_color
+
+    import asyncio
+    from lambda_coding_agent.tui.theme import terminal_theme_from_textual_theme
+
+    asyncio.run(check())

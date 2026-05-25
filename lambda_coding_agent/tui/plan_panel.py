@@ -24,11 +24,11 @@ _TASK_ICONS = {
 }
 
 _TASK_COLORS = {
-    "completed": "#5f8d5a",
-    "in_progress": "#d4a373",
-    "failed": "#c0392b",
-    "blocked": "#d4a373",
-    "forked": "#6f87a8",
+    "completed": "green",
+    "in_progress": "yellow",
+    "failed": "red",
+    "blocked": "yellow",
+    "forked": "blue",
 }
 
 
@@ -105,7 +105,7 @@ class PlanPanel(Vertical):
             icon = _TASK_ICONS.get(status, " ")
             fork_suffix = f" [{task['fork_id']}]" if task.get("fork_id") else ""
             line = f"{icon} {task['id']}  {task['title']}{fork_suffix}"
-            color = _TASK_COLORS.get(status, "#9ba3b0")
+            color = _TASK_COLORS.get(status, "default")
             rich_lines.append(line + "\n", style=color)
 
         try:

@@ -36,7 +36,7 @@ def _indent(text: str, prefix: str = "     ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
 
 
-def _format_header(icon: str, tool_name: str, summary: str, color: str = "#d4c9a2") -> str:
+def _format_header(icon: str, tool_name: str, summary: str, color: str = "yellow") -> str:
     """Format the header line with Rich color markup based on status."""
     if summary:
         text = f"{icon}  {tool_name}({summary})"
@@ -160,14 +160,14 @@ class ToolBlock(Vertical):
         text-style: bold;
     }
     .tool-block-result {
-        color: #8b95a7;
+        color: $text-muted;
     }
     .tool-block-content {
-        color: #9ba3b0;
+        color: $text;
         margin: 0 0 0 0;
     }
     .tool-block-truncation {
-        color: #6f87a8;
+        color: $text-primary;
         text-style: italic;
     }
     """
@@ -193,8 +193,8 @@ class ToolBlock(Vertical):
     @property
     def _status_color(self) -> str:
         if self._status == "running":
-            return "#d4a373"  # yellow/amber
-        return "#5f8d5a" if self._success else "#c0392b"  # green / red
+            return "yellow"
+        return "green" if self._success else "red"
 
     def _get_summary(self) -> str:
         formatter = _SUMMARY_MAP.get(self.tool_name, _summary_generic)
@@ -252,21 +252,21 @@ class ToolBlock(Vertical):
                     code_part = display_text[:sep_pos]
                     output_part = display_text[sep_pos + len(separator):]
                     parts = []
-                    parts.append(Syntax(code_part, "python", theme="monokai",
+                    parts.append(Syntax(code_part, "python", theme="ansi_dark",
                                         line_numbers=False, word_wrap=True, padding=(0, 5)))
-                    parts.append(Text(f"     ───", style="#6f87a8"))
+                    parts.append(Text(f"     ───", style="blue"))
                     if output_part:
-                        parts.append(Text(_indent(output_part), style="#9ba3b0"))
+                        parts.append(Text(_indent(output_part), style="default"))
                     return Group(*parts)
                 else:
                     # Only code visible (output truncated away)
-                    return Syntax(display_text, "python", theme="monokai",
+                    return Syntax(display_text, "python", theme="ansi_dark",
                                   line_numbers=False, word_wrap=True, padding=(0, 5))
             elif code:
-                return Syntax(display_text, "python", theme="monokai",
+                return Syntax(display_text, "python", theme="ansi_dark",
                               line_numbers=False, word_wrap=True, padding=(0, 5))
 
-        return Text(_indent(display_text), style="#9ba3b0")
+        return Text(_indent(display_text), style="default")
 
     def _refresh_content_display(self) -> None:
         """Re-render the content block based on expanded state."""

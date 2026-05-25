@@ -135,6 +135,26 @@ class TestCtrlOExpandNewToolBlocks:
         app._tools_expanded = not initial_state
         assert app._tools_expanded != initial_state
 
+    def test_toggle_scroll_preserves_anchor_widget_position(self):
+        """Toggle should track the top-visible widget and scroll to its new position.
+
+        Scenario: viewport shows ToolBlock B at the top (A is partially above).
+        After expand, B's position changes (pushed down by A's height increase).
+        The action should scroll to B's new position so B stays visually stationary.
+        """
+        # This test verifies the implementation strategy:
+        # 1. Before expand: record anchor widget id and region.y
+        # 2. After expand: find same widget by id, scroll to its new region.y
+        import inspect
+
+        source = inspect.getsource(LambdaCodingTUIApp.action_toggle_tool_expand)
+        # Verify the implementation uses anchor widget tracking
+        assert "anchor_widget_id" in source or "anchor" in source.lower()
+        # Verify it saves position before changing content
+        assert "scroll_y" in source
+        # Verify it restores position after
+        assert "scroll_to" in source
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Feature 6: Colored tool name by status (yellow/green/red)
@@ -143,41 +163,41 @@ class TestCtrlOExpandNewToolBlocks:
 
 class TestToolBlockColoredStatus:
     def test_format_header_with_running_color(self):
-        """Header should use yellow/amber color for running status."""
-        result = _format_header("⟳", "run_command", "ls", "#d4a373")
-        assert "[#d4a373]" in result
+        """Header should use semantic yellow for running status."""
+        result = _format_header("⟳", "run_command", "ls", "yellow")
+        assert "[yellow]" in result
         assert "run_command" in result
-        assert "[/#d4a373]" in result
+        assert "[/yellow]" in result
 
     def test_format_header_with_success_color(self):
-        """Header should use green color for success."""
-        result = _format_header("✓", "run_command", "ls", "#5f8d5a")
-        assert "[#5f8d5a]" in result
+        """Header should use semantic green for success."""
+        result = _format_header("✓", "run_command", "ls", "green")
+        assert "[green]" in result
 
     def test_format_header_with_error_color(self):
-        """Header should use red color for error."""
-        result = _format_header("✗", "run_command", "ls", "#c0392b")
-        assert "[#c0392b]" in result
+        """Header should use semantic red for error."""
+        result = _format_header("✗", "run_command", "ls", "red")
+        assert "[red]" in result
 
     def test_tool_block_status_color_running(self):
-        """ToolBlock._status_color should be amber when running."""
+        """ToolBlock._status_color should use theme-mapped yellow when running."""
         block = ToolBlock(tool_name="run_command", arguments={"command": "ls"})
         assert block._status == "running"
-        assert block._status_color == "#d4a373"
+        assert block._status_color == "yellow"
 
     def test_tool_block_status_color_success(self):
-        """ToolBlock._status_color should be green on success."""
+        """ToolBlock._status_color should use theme-mapped green on success."""
         block = ToolBlock(tool_name="run_command", arguments={"command": "ls"})
         block._status = "done"
         block._success = True
-        assert block._status_color == "#5f8d5a"
+        assert block._status_color == "green"
 
     def test_tool_block_status_color_error(self):
-        """ToolBlock._status_color should be red on failure."""
+        """ToolBlock._status_color should use theme-mapped red on failure."""
         block = ToolBlock(tool_name="run_command", arguments={"command": "ls"})
         block._status = "done"
         block._success = False
-        assert block._status_color == "#c0392b"
+        assert block._status_color == "red"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

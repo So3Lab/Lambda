@@ -29,12 +29,12 @@ class SelectModalScreen(Screen):
     SelectModalScreen .modal-container {
         width: 80%;
         max-height: 70%;
-        background: #1a1d24;
-        border: tall #2a2f3a;
+        background: $panel;
+        border: tall $border-blurred;
     }
     SelectModalScreen .modal-title {
         text-style: bold;
-        color: #6f87a8;
+        color: $primary;
         padding: 0 2 1 2;
     }
     SelectModalScreen .modal-list {
@@ -44,10 +44,11 @@ class SelectModalScreen(Screen):
         padding: 0 1;
     }
     SelectModalScreen .select-item--focused {
-        background: #2a8c8c;
-        color: #0f1115;
+        background: $accent;
+        color: $background;
     }
     SelectModalScreen .modal-hint {
+        color: $text-muted;
         text-style: dim;
         padding: 1 2 0 2;
     }

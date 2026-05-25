@@ -39,7 +39,7 @@ class SessionListModalScreen(SelectModalScreen):
         return items
 
     def on_key(self, event) -> None:
-        if event.key == "shift+d" and self._items:
+        if event.key in ("shift+d", "D") and self._items:
             # Cannot delete "New Session" (index 0)
             idx = self._focused_index
             if idx > 0:
