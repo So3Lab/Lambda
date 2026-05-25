@@ -119,20 +119,25 @@ installed into the PyRepl.
 | Primitive | Current behavior | Notes / limits |
 | --- | --- | --- |
 | `runtime.workspace.run_command(command, cwd="", timeout=120)` | Runs a shell command in the workspace or workspace-relative cwd with `subprocess.run`, captures stdout/stderr, returns structured text. | Captures after completion; no background mode or TUI streaming inside the primitive. Stdout is capped at 80,000 chars. |
-| `runtime.workspace.read_file(path, offset=0, limit=0)` | Reads a workspace-relative text file with line numbers. Default limit is 2,000 lines. | Rejects paths outside workspace and null-byte binary files. |
+| `runtime.workspace.read_file(path, offset=0, limit=0)` | Reads a workspace-relative text file with line numbers. Default limit is 2,000 lines. | Rejects paths outside workspace and configured bypass roots; rejects null-byte binary files. |
 | `runtime.workspace.edit_file(path, old_string, new_string)` | Replaces an exact string that must appear exactly once, writes the file, stores a backend undo snapshot, and returns a unified diff. | Whitespace/case sensitive; no exposed runtime undo primitive. |
 | `runtime.workspace.write_file(path, content, overwrite=False)` | Creates parent directories and writes a new file; refuses existing files unless `overwrite=True`. | Prefer `edit_file` for existing files. |
-| `runtime.workspace.find_files(pattern, path="")` | Uses `Path.glob`, returns up to 200 sorted relative file paths. | Uses a fixed exclude directory list; does not parse `.gitignore`. |
-| `runtime.workspace.search(pattern, path="", glob="", context=2)` | Python regex search with context lines and up to 100 matches. | Not ripgrep-backed. |
+| `runtime.workspace.find_files(pattern, path="")` | Uses `Path.glob`, returns up to 200 sorted paths. | `path` may target the workspace or a configured bypass root; uses a fixed exclude directory list and does not parse `.gitignore`. |
+| `runtime.workspace.search(pattern, path="", glob="", context=2)` | Python regex search with context lines and up to 100 matches. | `path` may target the workspace or a configured bypass root; not ripgrep-backed. |
 | `runtime.workspace.web_fetch(url, timeout=20, max_chars=20000, file="", output_path="")` | Fetches public HTTP/HTTPS text, saves the full readable text to a workspace file, and returns a short preview plus `saved_path`. | Uses `tools/webfetch.py`; `output_path` is a deprecated alias for `file`. |
-| `runtime.workspace.plan_create(...)` | Creates and activates a file-backed plan under `.lambda/plans/`. | Tasks are passed as a JSON string. |
+| `runtime.workspace.plan_create(...)` | Creates and activates a file-backed plan under `.lambda/plans/`. | Tasks are passed as a Python list of task dicts. |
 | `runtime.workspace.plan_get(plan_id="current", view="summary")` | Reads the active or named plan as summary, ready-task view, or full JSON. | Auto-active plan comes from the plan index. |
 | `runtime.workspace.plan_update_task(...)` | Updates task status, execution mode, fork id, result, or error. | Auto-deactivates when all non-skipped tasks are terminal. |
-| `runtime.workspace.plan_add_tasks(...)` | Adds tasks to an existing plan. | Tasks are passed as a JSON string. |
+| `runtime.workspace.plan_add_tasks(...)` | Adds tasks to an existing plan. | Tasks are passed as a Python list of task dicts. |
 
 The direct async helpers under `lambda_coding_agent/tools/` mirror many of these
 operations and are heavily tested, but the active agent prompt directs models to
 use the runtime primitives from inside `execute_code`.
+
+Runtime file primitives allow only the workspace by default. Additional external
+roots can be configured with `bypass_paths` (or `bypassPaths`) in either
+`~/.lambda/config.json` or `<workspace>/.lambda/config.json`, for example
+`{"bypass_paths": ["~/.lambda", "~/.agents"]}`.
 
 ## TUI Implementation
 
@@ -187,6 +192,9 @@ Session behavior:
 - Session selector supports new/load/delete.
 - Rewind creates a new forked session by truncating history before a selected
   user message and copying the parent's session-scoped plan index.
+- The planned replacement for fork-as-new-session is documented in
+  `dev-docs/session-branching-refactor.md`: keep one session per conversation
+  workspace and represent rewinds/forks as branches inside a message tree.
 
 Plan behavior:
 

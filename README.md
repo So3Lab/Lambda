@@ -117,6 +117,14 @@ The normal tool model is intentionally small: the model writes Python for `execu
 | `runtime.workspace.plan_update_task()` | Update task status, result, fork id, or error. |
 | `runtime.workspace.plan_add_tasks()` | Add tasks to a plan. |
 
+File primitives are workspace-scoped by default. To allow explicit external roots such as `~/.lambda/` or `~/.agents/`, add `bypass_paths` (or `bypassPaths`) to `~/.lambda/config.json` or `<workspace>/.lambda/config.json`:
+
+```json
+{
+  "bypass_paths": ["~/.lambda", "~/.agents"]
+}
+```
+
 ## Agent Skills
 
 Skills are regular directories containing a `SKILL.md` file with frontmatter. LambdaCodingAgent discovers skills from:

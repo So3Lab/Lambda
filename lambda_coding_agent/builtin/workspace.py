@@ -31,9 +31,12 @@ from SimpleLLMFunc.runtime.primitives import (
 class WorkspaceBackend:
     """Shared state for all workspace primitives."""
 
+    CONFIG_NAMES = ("bypass_paths", "bypassPaths")
+
     def __init__(self, workspace: str, session_id: str | None = None) -> None:
         self.workspace = Path(workspace).resolve()
         self.session_id = session_id
+        self.bypass_paths = self._load_bypass_paths()
         self._undo_stack: list[dict[str, Any]] = []
         self._plan_manager: Any = None  # lazy init
 
@@ -45,14 +48,75 @@ class WorkspaceBackend:
             self._plan_manager = PlanManager(str(self.workspace), self.session_id)
         return self._plan_manager
 
-    def _resolve_path(self, path: str) -> tuple[Path | None, str | None]:
-        """Resolve a workspace-relative path. Returns (abs_path, error)."""
+    def _load_bypass_paths(self) -> list[Path]:
+        """Load configured absolute paths that file primitives may access."""
+        paths: list[Path] = []
+        for config_path in (
+            Path.home() / ".lambda" / "config.json",
+            self.workspace / ".lambda" / "config.json",
+        ):
+            try:
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for name in self.CONFIG_NAMES:
+                value = data.get(name)
+                if isinstance(value, list):
+                    paths.extend(self._normalize_bypass_path(item) for item in value if isinstance(item, str))
+
+        unique_paths: list[Path] = []
+        seen: set[Path] = set()
+        for path in paths:
+            if path not in seen:
+                seen.add(path)
+                unique_paths.append(path)
+        return unique_paths
+
+    def _normalize_bypass_path(self, path: str) -> Path:
+        expanded = Path(os.path.expandvars(path)).expanduser()
+        if not expanded.is_absolute():
+            expanded = self.workspace / expanded
+        return expanded.resolve(strict=False)
+
+    def _format_path(self, path: Path) -> str:
         try:
-            resolved = (self.workspace / path).resolve()
-            resolved.relative_to(self.workspace)
-            return resolved, None
-        except (ValueError, RuntimeError):
+            return str(path.relative_to(self.workspace))
+        except ValueError:
+            return str(path)
+
+    def _is_allowed_path(self, path: Path) -> bool:
+        try:
+            path.relative_to(self.workspace)
+            return True
+        except ValueError:
+            pass
+        for bypass_path in self.bypass_paths:
+            try:
+                path.relative_to(bypass_path)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _resolve_path(self, path: str) -> tuple[Path | None, str | None]:
+        """Resolve a path within the workspace or configured bypass paths. Returns (abs_path, error)."""
+        try:
+            raw_path = Path(os.path.expandvars(path)).expanduser()
+            if raw_path.is_absolute():
+                resolved = raw_path.resolve(strict=False)
+            else:
+                resolved = (self.workspace / raw_path).resolve(strict=False)
+        except RuntimeError:
             return None, f"Path is outside workspace: {path}"
+
+        if self._is_allowed_path(resolved):
+            return resolved, None
+        return None, f"Path is outside workspace and configured bypass paths: {path}"
+
+    def _resolve_base_path(self, path: str) -> tuple[Path | None, str | None]:
+        if not path:
+            return self.workspace, None
+        return self._resolve_path(path)
 
 
 # ---------------------------------------------------------------------------
@@ -367,11 +431,13 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
           tests/test_main.py
         """
         backend: WorkspaceBackend = ctx.backend
-        base = backend.workspace
-        if path:
-            base = base / path
-            if not base.exists():
-                return f"Directory not found: {path}"
+        base, err = backend._resolve_base_path(path)
+        if err:
+            return f"Error: {err}"
+        if not base.exists():
+            return f"Directory not found: {path}"
+        if not base.is_dir():
+            return f"Not a directory: {path}"
 
         EXCLUDE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache"}
         MAX_RESULTS = 200
@@ -379,12 +445,9 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         results = []
         for match in base.glob(pattern):
             if match.is_file():
-                try:
-                    rel = match.relative_to(backend.workspace)
-                    if not any(part in EXCLUDE_DIRS for part in rel.parts):
-                        results.append(str(rel))
-                except ValueError:
-                    pass
+                display_path = backend._format_path(match)
+                if not any(part in EXCLUDE_DIRS for part in Path(display_path).parts):
+                    results.append(display_path)
                 if len(results) >= MAX_RESULTS:
                     break
 
@@ -433,11 +496,13 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         except re.error as e:
             return f"Error: Invalid regex: {e}"
 
-        base = backend.workspace
-        if path:
-            base = base / path
-            if not base.exists():
-                return f"Directory not found: {path}"
+        base, err = backend._resolve_base_path(path)
+        if err:
+            return f"Error: {err}"
+        if not base.exists():
+            return f"Directory not found: {path}"
+        if not base.is_dir():
+            return f"Not a directory: {path}"
 
         EXCLUDE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
         MAX_MATCHES = 100
@@ -457,11 +522,11 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
 
         for file_path in files:
             try:
-                rel = file_path.relative_to(backend.workspace)
-                if any(part in EXCLUDE_DIRS for part in rel.parts):
+                display_path = backend._format_path(file_path)
+                if any(part in EXCLUDE_DIRS for part in Path(display_path).parts):
                     continue
                 text = file_path.read_text(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):
+            except OSError:
                 continue
 
             lines = text.splitlines()
@@ -473,7 +538,7 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
             if not matched_line_nums:
                 continue
 
-            output_parts.append(f"--- {rel} ---")
+            output_parts.append(f"--- {display_path} ---")
             for num in matched_line_nums:
                 start = max(0, num - context)
                 end = min(len(lines), num + context + 1)
@@ -585,24 +650,24 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         ctx: PrimitiveCallContext,
         title: str,
         goal: str,
-        tasks: str = "",
+        tasks: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Use: Create a new file-backed plan and set it as active.
-        Input: `title: str`, `goal: str`, `tasks: str` (JSON string of task list, optional).
+        Input: `title: str`, `goal: str`, `tasks: list[dict] | None` (optional).
         Output: Confirmation with plan id and file path.
         Parse: Read the plan id for follow-up operations (plan_update_task, plan_get).
         Parameters:
         - title: Short human-readable name for the plan (e.g., "Refactor auth module").
         - goal: Detailed description of what this plan aims to achieve.
-        - tasks: JSON string of task array. Each task: {"title":"...","description":"...","execution_mode":"main_agent","depends_on":[]}.
+        - tasks: Python list of task dicts. Each task: {"title":"...","description":"...","execution_mode":"main_agent","depends_on":[]}.
         Best Practices:
         - Use only for complex multi-step tasks (3+ subtasks), not simple single-step edits.
         - Include 3-10 initial tasks with clear titles and actionable descriptions.
         - Mark independent research/inspection tasks as fork_candidate for parallel execution.
         - Set depends_on to express task ordering (e.g., implement depends on read).
         - After creating a plan, use plan_get(view="ready") to see what to work on next.
-        - Example: tasks='[{"title":"Read auth code","description":"Inspect current auth implementation","execution_mode":"main_agent","depends_on":[]}]'.
+        - Example: tasks=[{"title":"Read auth code","description":"Inspect current auth implementation","execution_mode":"main_agent","depends_on":[]}].
         Output Example:
           Created active plan plan_20240101_123456 with 3 task(s).
           Saved to .lambda/plans/plan_20240101_123456.json
@@ -610,16 +675,7 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         backend: WorkspaceBackend = ctx.backend
         mgr = backend.plan_manager
 
-        parsed_tasks: list[dict] | None = None
-        if tasks.strip():
-            try:
-                parsed_tasks = json.loads(tasks)
-                if not isinstance(parsed_tasks, list):
-                    parsed_tasks = None
-            except (json.JSONDecodeError, TypeError):
-                parsed_tasks = None
-
-        plan = mgr.create_plan(title, goal, parsed_tasks)
+        plan = mgr.create_plan(title, goal, tasks)
         n = len(plan["tasks"])
         return (
             f"Created active plan {plan['id']} with {n} task(s).\n"
@@ -728,16 +784,16 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
     def ws_plan_add_tasks(
         ctx: PrimitiveCallContext,
         plan_id: str = "current",
-        tasks: str = "",
+        tasks: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Use: Add newly discovered tasks to an existing plan.
-        Input: `plan_id: str` (or 'current'), `tasks: str` (JSON string of task list).
+        Input: `plan_id: str` (or 'current'), `tasks: list[dict] | None`.
         Output: Confirmation with count of added tasks.
         Parse: Read the confirmation to verify tasks were added.
         Parameters:
         - plan_id: Plan id or 'current' for the active plan.
-        - tasks: JSON string of new task array. Each task: {"title":"...","description":"...","depends_on":[]}.
+        - tasks: Python list of new task dicts. Each task: {"title":"...","description":"...","depends_on":[]}.
         Best Practices:
         - Use when you discover new subtasks during execution that weren't in the original plan.
         - Set depends_on to express ordering with existing tasks (reference existing task_ids).
@@ -750,20 +806,11 @@ def build_workspace_pack(workspace: str, session_id: str | None = None) -> Primi
         backend: WorkspaceBackend = ctx.backend
         mgr = backend.plan_manager
 
-        parsed_tasks: list[dict] | None = None
-        if tasks.strip():
-            try:
-                parsed_tasks = json.loads(tasks)
-                if not isinstance(parsed_tasks, list):
-                    parsed_tasks = None
-            except (json.JSONDecodeError, TypeError):
-                parsed_tasks = None
-
-        if parsed_tasks is None:
-            parsed_tasks = []
-        plan = mgr.add_tasks(plan_id, parsed_tasks)
+        if tasks is None:
+            tasks = []
+        plan = mgr.add_tasks(plan_id, tasks)
         return (
-            f"Added {len(parsed_tasks)} task(s) to {plan['id']}.\n"
+            f"Added {len(tasks)} task(s) to {plan['id']}.\n"
             f"Plan saved to .lambda/plans/{plan['id']}.json"
         )
 

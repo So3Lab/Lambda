@@ -26,7 +26,7 @@ def _make_tools(workspace: str, session_id: str | None = None):
 def _build_system_prompt(skill_catalog_block: str = "") -> str:
     """Build the system prompt for the coding agent."""
     skills_section = f"\n{skill_catalog_block}\n" if skill_catalog_block else ""
-    return f"""You are a coding agent operating in the user's terminal.
+    prompt = f"""You are a coding agent operating in the user's terminal.
 You have direct access to their project files and can run shell commands.
 
 ## Operating Rules
@@ -47,10 +47,10 @@ All workspace operations are available as runtime primitives, called inside exec
   runtime.workspace.find_files("**/*.py")              — glob patterns
   runtime.workspace.search("pattern", glob="*.py")     — regex search
   runtime.workspace.web_fetch("https://example.com")    — fetch public HTTP/HTTPS pages
-  runtime.workspace.plan_create("Title", "Goal", tasks='[{{"title":"T1","description":"...","execution_mode":"main_agent","depends_on":[]}}]')
+  runtime.workspace.plan_create("Title", "Goal", tasks=[{{{{"title":"T1","description":"...","execution_mode":"main_agent","depends_on":[]}}}}])
   runtime.workspace.plan_get(view="summary")           — "summary" | "ready" | "full"
   runtime.workspace.plan_update_task(task_id="task_001", status="completed")
-  runtime.workspace.plan_add_tasks(tasks='[{{"title":"T2","depends_on":["task_001"]}}]')
+  runtime.workspace.plan_add_tasks(tasks=[{{{{"title":"T2","depends_on":["task_001"]}}}}])
 
 Use runtime.list_primitives() to see all available primitives.
 Use runtime.get_primitive_spec("workspace.xxx") for full documentation of any primitive.
@@ -64,11 +64,11 @@ Use runtime.get_primitive_spec("workspace.xxx") for full documentation of any pr
    ```
 2. **Plan** (for complex tasks with 3+ substeps): Create a plan to track progress.
    ```python
-   runtime.workspace.plan_create("Refactor auth", "Migrate to JWT", tasks='[
-     {{"title":"Read current auth code","description":"Inspect auth module","execution_mode":"main_agent","depends_on":[]}},
-     {{"title":"Implement JWT","description":"Add jwt encoding/decoding","execution_mode":"main_agent","depends_on":["task_001"]}},
-     {{"title":"Update tests","description":"Fix test suite","execution_mode":"main_agent","depends_on":["task_002"]}}
-   ]')
+   runtime.workspace.plan_create("Refactor auth", "Migrate to JWT", tasks=[
+     {{{{"title":"Read current auth code","description":"Inspect auth module","execution_mode":"main_agent","depends_on":[]}}}},
+     {{{{"title":"Implement JWT","description":"Add jwt encoding/decoding","execution_mode":"main_agent","depends_on":["task_001"]}}}},
+     {{{{"title":"Update tests","description":"Fix test suite","execution_mode":"main_agent","depends_on":["task_002"]}}}}
+   ])
    ```
 3. **Execute**: Work through tasks, updating plan as you go.
    ```python
@@ -77,6 +77,16 @@ Use runtime.get_primitive_spec("workspace.xxx") for full documentation of any pr
    runtime.workspace.edit_file("src/auth.py", old_string="...", new_string="...")
    runtime.workspace.run_command("pytest tests/test_auth.py")
    runtime.workspace.plan_update_task(task_id="task_001", status="completed", result="Migrated to jwt.decode")
+   # After a milestone, compact to keep context clean:
+   runtime.selfref.context.compact(
+     goal="Migrate auth module to JWT",
+     instruction="Replace session-based auth with JWT tokens",
+     discoveries=["Current auth uses server-side sessions stored in Redis"],
+     completed=["Read src/auth.py", "Implemented jwt.encode/decode", "Updated tests"],
+     current_status="Tests passing. Migration complete for core auth flow.",
+     likely_next_work=["Update login endpoint to return JWT", "Add token refresh logic"],
+     relevant_files_directories=["src/auth.py", "tests/test_auth.py"],
+   )
    ```
 4. **Verify**: Run tests, check output, confirm the change works.
    ```python
@@ -102,7 +112,7 @@ Use runtime.get_primitive_spec("workspace.xxx") for full documentation of any pr
 - runtime.selfref.context.inspect() — read-only snapshot of current context.
 - runtime.selfref.context.remember(text) — store a durable experience.
 - runtime.selfref.context.forget(experience_id) — remove an experience.
-- runtime.selfref.context.compact(...) — checkpoint context for compaction.
+- runtime.selfref.context.compact(goal, instruction, discoveries, completed, current_status, likely_next_work, relevant_files_directories) — queue a milestone compaction. All 7 fields are required: goal (str), instruction (str), discoveries (list[str]), completed (list[str]), current_status (str), likely_next_work (list[str]), relevant_files_directories (list[str]). Optional: remember (list[str]), key (str).
 - runtime.selfref.fork.spawn(message) — spawn a child agent asynchronously.
 - runtime.selfref.fork.gather_all(...) — collect results from spawned children.
 - Use fork/sub-agent parallelism for independent, parallelizable subtasks.
@@ -114,6 +124,14 @@ Use runtime.get_primitive_spec("workspace.xxx") for full documentation of any pr
 - Forks must NOT use print() or code execution to communicate results — reply directly in text.
 - For long findings, forks should write results to a file and reply with the file path.
 - Fork messages should be self-contained: include goal, scope, inputs, and expected output format.
+
+## Context Compaction
+After each significant milestone, compact your context to replace the working transcript with a structured summary:
+1. Use `runtime.selfref.context.inspect()` to see current context state.
+2. Call `runtime.selfref.context.compact(...)` with all 7 required fields filled in with concise, structured content.
+3. The compaction is queued and applied after the current tool batch finishes.
+4. Keep the summary concise but sufficient — the next step should be able to continue from it without the original transcript.
+5. Use the `remember` parameter to add durable experiences that should survive future compactions.
 
 ## Plan Tool Workflow
 For complex multi-step tasks, use the file-backed plan primitives.
@@ -137,6 +155,7 @@ When using fork subagents:
 {skills_section}
 {{environment_block}}
 """
+    return prompt
 
 
 def create_agent(

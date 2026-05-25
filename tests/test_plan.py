@@ -5,7 +5,9 @@ import os
 import tempfile
 
 import pytest
+from SimpleLLMFunc.runtime.primitives import PrimitiveCallContext
 
+from lambda_coding_agent.builtin.workspace import build_workspace_pack
 from lambda_coding_agent.tools.plan import (
     PlanManager,
     plan_create,
@@ -367,3 +369,42 @@ class TestPlanTools:
         await plan_create(title="Test", goal="Goal", workspace=tmp_workspace)
         result = await plan_add_tasks(plan_id="current", tasks=None, workspace=tmp_workspace)
         assert "Added 0 task" in result
+
+    def test_workspace_plan_primitives_accept_task_objects(self, tmp_workspace):
+        pack = build_workspace_pack(tmp_workspace)
+        ctx = PrimitiveCallContext(
+            primitive_name="workspace.plan_create",
+            call_id="test",
+            execution_id="test",
+            backend=pack.backend,
+        )
+        create_entry = next(e for e in pack.primitives if e.name == "workspace.plan_create")
+        add_entry = next(e for e in pack.primitives if e.name == "workspace.plan_add_tasks")
+
+        result = create_entry.handler(
+            ctx,
+            "Test",
+            "Goal",
+            tasks=[{"title": "T1", "description": "First"}],
+        )
+        assert "Created active plan" in result
+        assert "1 task" in result
+
+        add_result = add_entry.handler(
+            ctx,
+            tasks=[{"title": "T2", "depends_on": ["task_001"]}],
+        )
+        assert "Added 1 task" in add_result
+
+        plan = pack.backend.plan_manager.load_plan("current")
+        assert [task["title"] for task in plan["tasks"]] == ["T1", "T2"]
+
+    def test_workspace_plan_spec_describes_task_objects(self, tmp_workspace):
+        pack = build_workspace_pack(tmp_workspace)
+        create_entry = next(e for e in pack.primitives if e.name == "workspace.plan_create")
+        add_entry = next(e for e in pack.primitives if e.name == "workspace.plan_add_tasks")
+
+        assert "list[dict" in create_entry.contract.input_type
+        assert "JSON string" not in create_entry.contract.input_type
+        assert "list[dict" in add_entry.contract.input_type
+        assert "JSON string" not in add_entry.contract.input_type
