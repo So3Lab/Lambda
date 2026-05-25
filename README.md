@@ -39,11 +39,9 @@ If you are not using Poetry, create an environment with Python 3.12+ and install
 
 ## Provider configuration
 
-LambdaCodingAgent looks for provider config in this order:
+LambdaCodingAgent merges provider config from `~/.lambda/provider.json` and workspace provider config (`<workspace>/.lambda/provider.json` or legacy `<workspace>/provider.json`). Workspace provider entries override duplicate home entries. `--provider-json PATH` bypasses that merge and uses the explicit file.
 
-1. `--provider-json PATH`
-2. `<workspace>/provider.json`
-3. `~/.lambda-agent/provider.json`
+General config is merged from `~/.lambda/config.json` and `<workspace>/.lambda/config.json`, with workspace values taking precedence. `--model` and `--provider` override merged config values.
 
 Example shape:
 
@@ -117,11 +115,11 @@ The normal tool model is intentionally small: the model writes Python for `execu
 | `runtime.workspace.plan_update_task()` | Update task status, result, fork id, or error. |
 | `runtime.workspace.plan_add_tasks()` | Add tasks to a plan. |
 
-File primitives are workspace-scoped by default. To allow explicit external roots such as `~/.lambda/` or `~/.agents/`, add `bypass_paths` (or `bypassPaths`) to `~/.lambda/config.json` or `<workspace>/.lambda/config.json`:
+File primitives are workspace-scoped by default. To allow explicit external roots such as `$HOME/.lambda/` or `$HOME/.agents/`, add `bypass_paths` (or `bypassPaths`) to `~/.lambda/config.json` or `<workspace>/.lambda/config.json`:
 
 ```json
 {
-  "bypass_paths": ["~/.lambda", "~/.agents"]
+  "bypass_paths": ["$HOME/.lambda", "$HOME/.agents"]
 }
 ```
 

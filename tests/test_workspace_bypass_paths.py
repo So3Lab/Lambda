@@ -96,3 +96,26 @@ def test_write_edit_find_and_search_allow_configured_bypass_path(tmp_path):
     assert "Success" in edit_result
     assert str(bypass_file) in find_result
     assert f"--- {bypass_file} ---" in search_result
+
+def test_ascii_tilde_bypass_path_is_treated_as_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    bypass = home / ".agents"
+    workspace.mkdir()
+    bypass.mkdir(parents=True)
+    (bypass / "SKILL.md").write_text("skill docs\n", encoding="utf-8")
+    (workspace / ".lambda").mkdir()
+    (workspace / ".lambda" / "config.json").write_text(
+        json.dumps({"bypass_paths": ["~/.agents"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    pack = build_workspace_pack(str(workspace))
+    result = _entry(pack, "read_file").handler(
+        _ctx(pack, "read_file"),
+        str(bypass / "SKILL.md"),
+    )
+
+    assert "1 | skill docs" in result
+

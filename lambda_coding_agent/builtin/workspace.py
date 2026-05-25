@@ -7,14 +7,13 @@ runtime primitives callable via ``runtime.workspace.xxx(...)`` inside
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+from lambda_coding_agent.config import load_lambda_config
 from lambda_coding_agent.tools.webfetch import _web_fetch_sync
 
 from SimpleLLMFunc.runtime.primitives import (
@@ -31,11 +30,10 @@ from SimpleLLMFunc.runtime.primitives import (
 class WorkspaceBackend:
     """Shared state for all workspace primitives."""
 
-    CONFIG_NAMES = ("bypass_paths", "bypassPaths")
-
     def __init__(self, workspace: str, session_id: str | None = None) -> None:
         self.workspace = Path(workspace).resolve()
         self.session_id = session_id
+        self.config = load_lambda_config(str(self.workspace))
         self.bypass_paths = self._load_bypass_paths()
         self._undo_stack: list[dict[str, Any]] = []
         self._plan_manager: Any = None  # lazy init
@@ -50,20 +48,15 @@ class WorkspaceBackend:
 
     def _load_bypass_paths(self) -> list[Path]:
         """Load configured absolute paths that file primitives may access."""
-        paths: list[Path] = []
-        for config_path in (
-            Path.home() / ".lambda" / "config.json",
-            self.workspace / ".lambda" / "config.json",
-        ):
-            try:
-                data = json.loads(config_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            for name in self.CONFIG_NAMES:
-                value = data.get(name)
-                if isinstance(value, list):
-                    paths.extend(self._normalize_bypass_path(item) for item in value if isinstance(item, str))
+        value = self.config.get("bypass_paths")
+        if not isinstance(value, list):
+            return []
 
+        paths = [
+            self._normalize_bypass_path(item)
+            for item in value
+            if isinstance(item, str)
+        ]
         unique_paths: list[Path] = []
         seen: set[Path] = set()
         for path in paths:
@@ -73,6 +66,8 @@ class WorkspaceBackend:
         return unique_paths
 
     def _normalize_bypass_path(self, path: str) -> Path:
+        if path == "~" or path.startswith("~/"):
+            path = "$HOME" + path[1:]
         expanded = Path(os.path.expandvars(path)).expanduser()
         if not expanded.is_absolute():
             expanded = self.workspace / expanded

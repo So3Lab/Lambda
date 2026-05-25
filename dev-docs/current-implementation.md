@@ -137,7 +137,7 @@ use the runtime primitives from inside `execute_code`.
 Runtime file primitives allow only the workspace by default. Additional external
 roots can be configured with `bypass_paths` (or `bypassPaths`) in either
 `~/.lambda/config.json` or `<workspace>/.lambda/config.json`, for example
-`{"bypass_paths": ["~/.lambda", "~/.agents"]}`.
+`{"bypass_paths": ["$HOME/.lambda", "$HOME/.agents"]}`.
 
 ## TUI Implementation
 
@@ -224,11 +224,11 @@ the same name.
 
 ## Config and Environment Detection
 
-`config.py` searches for provider config in this order:
+`config.py` merges configuration at startup:
 
-1. Explicit `--provider-json` path.
-2. `<workspace>/provider.json`.
-3. `~/.lambda-agent/provider.json`.
+- `~/.lambda/config.json` plus `<workspace>/.lambda/config.json`, with workspace values overriding duplicate home values.
+- Provider config from `~/.lambda/provider.json`, `<workspace>/.lambda/provider.json`, and legacy `<workspace>/provider.json`, with workspace provider entries overriding duplicate home entries.
+- Explicit `--provider-json` bypasses provider merging; `--model` and `--provider` override merged config values.
 
 `context/environment.py` currently detects:
 
